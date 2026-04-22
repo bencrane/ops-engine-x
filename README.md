@@ -22,6 +22,12 @@ Current secrets:
 | Name | Required | Notes |
 | ---- | -------- | ----- |
 | `ANTHROPIC_API_KEY` | lazy | Needed only by code paths that call Anthropic |
+| `SUPABASE_DB_URL` | lazy | Postgres connection string for the managed-agents DB |
+| `SUPABASE_URL` | lazy | Supabase REST URL (reserved for future use) |
+| `SUPABASE_SERVICE_ROLE_KEY` | lazy | Supabase service-role key (reserved for future use) |
+| `SUPABASE_ANON_KEY` | lazy | Supabase anon key (reserved) |
+| `SUPABASE_PROJECT_REF` | lazy | `imfwppinnfbptqdyraod` |
+| `MAG_AUTH_TOKEN` | lazy | Bearer token for `POST /admin/sync/anthropic` |
 
 ## Local development
 

@@ -9,11 +9,18 @@ from __future__ import annotations
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from app import agent_defaults as agent_defaults_store
 from app.anthropic_client import get_agent, list_agents
 from app.config import settings
 from app.deps import require_admin_token
 from app.sync import sync_from_anthropic
+
+
+class AgentDefaultsPayload(BaseModel):
+    environment_id: str = Field(..., min_length=1)
+    vault_ids: list[str] = Field(default_factory=list)
 
 app = FastAPI(
     title="managed-agents-x-api",
@@ -51,6 +58,34 @@ def _passthrough_upstream_error(exc: httpx.HTTPStatusError) -> JSONResponse:
     except ValueError:
         body = {"detail": exc.response.text or "Upstream Anthropic error"}
     return JSONResponse(status_code=exc.response.status_code, content=body)
+
+
+@app.get("/agents/defaults", dependencies=[Depends(require_admin_token)])
+def list_agent_defaults() -> dict[str, object]:
+    """List every agent_defaults row (frontend merges with /agents client-side)."""
+    rows = agent_defaults_store.list_all()
+    return {"data": rows, "count": len(rows)}
+
+
+@app.get("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
+def get_agent_defaults(agent_id: str) -> dict:
+    row = agent_defaults_store.get(agent_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No defaults configured for this agent")
+    return row
+
+
+@app.put("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
+def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> dict:
+    return agent_defaults_store.upsert(agent_id, payload.environment_id, payload.vault_ids)
+
+
+@app.delete("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
+def delete_agent_defaults(agent_id: str) -> dict[str, bool]:
+    deleted = agent_defaults_store.delete(agent_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No defaults configured for this agent")
+    return {"deleted": True}
 
 
 @app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)

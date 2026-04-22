@@ -22,9 +22,30 @@ class AgentDefaultsPayload(BaseModel):
     environment_id: str = Field(..., min_length=1)
     vault_ids: list[str] = Field(default_factory=list)
 
+
+class AgentDefaults(BaseModel):
+    agent_id: str
+    environment_id: str
+    vault_ids: list[str]
+
+
+class AgentDefaultsList(BaseModel):
+    data: list[AgentDefaults]
+    count: int
+
+
+class DeleteResult(BaseModel):
+    deleted: bool
+
+
 app = FastAPI(
     title="managed-agents-x-api",
     version="0.1.0",
+    description=(
+        "Backend service that owns the Anthropic Managed Agents API key and "
+        "stores per-agent defaults (environment_id, vault_ids) for external triggers. "
+        "All /agents* and /admin* routes require a bearer MAG_AUTH_TOKEN."
+    ),
 )
 
 
@@ -60,32 +81,49 @@ def _passthrough_upstream_error(exc: httpx.HTTPStatusError) -> JSONResponse:
     return JSONResponse(status_code=exc.response.status_code, content=body)
 
 
-@app.get("/agents/defaults", dependencies=[Depends(require_admin_token)])
-def list_agent_defaults() -> dict[str, object]:
+@app.get(
+    "/agents/defaults",
+    dependencies=[Depends(require_admin_token)],
+    response_model=AgentDefaultsList,
+)
+def list_agent_defaults() -> AgentDefaultsList:
     """List every agent_defaults row (frontend merges with /agents client-side)."""
     rows = agent_defaults_store.list_all()
-    return {"data": rows, "count": len(rows)}
+    return AgentDefaultsList(data=[AgentDefaults(**r) for r in rows], count=len(rows))
 
 
-@app.get("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
-def get_agent_defaults(agent_id: str) -> dict:
+@app.get(
+    "/agents/{agent_id}/defaults",
+    dependencies=[Depends(require_admin_token)],
+    response_model=AgentDefaults,
+)
+def get_agent_defaults(agent_id: str) -> AgentDefaults:
     row = agent_defaults_store.get(agent_id)
     if row is None:
         raise HTTPException(status_code=404, detail="No defaults configured for this agent")
-    return row
+    return AgentDefaults(**row)
 
 
-@app.put("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
-def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> dict:
-    return agent_defaults_store.upsert(agent_id, payload.environment_id, payload.vault_ids)
+@app.put(
+    "/agents/{agent_id}/defaults",
+    dependencies=[Depends(require_admin_token)],
+    response_model=AgentDefaults,
+)
+def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> AgentDefaults:
+    row = agent_defaults_store.upsert(agent_id, payload.environment_id, payload.vault_ids)
+    return AgentDefaults(**row)
 
 
-@app.delete("/agents/{agent_id}/defaults", dependencies=[Depends(require_admin_token)])
-def delete_agent_defaults(agent_id: str) -> dict[str, bool]:
+@app.delete(
+    "/agents/{agent_id}/defaults",
+    dependencies=[Depends(require_admin_token)],
+    response_model=DeleteResult,
+)
+def delete_agent_defaults(agent_id: str) -> DeleteResult:
     deleted = agent_defaults_store.delete(agent_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="No defaults configured for this agent")
-    return {"deleted": True}
+    return DeleteResult(deleted=True)
 
 
 @app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)

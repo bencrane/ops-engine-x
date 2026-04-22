@@ -53,7 +53,7 @@ def _passthrough_upstream_error(exc: httpx.HTTPStatusError) -> JSONResponse:
     return JSONResponse(status_code=exc.response.status_code, content=body)
 
 
-@app.get("/agents", dependencies=[Depends(require_admin_token)])
+@app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)
 def get_agents() -> JSONResponse | dict[str, object]:
     """List all managed agents (live passthrough to Anthropic, paginated server-side)."""
     try:
@@ -65,7 +65,7 @@ def get_agents() -> JSONResponse | dict[str, object]:
     return {"data": agents, "count": len(agents)}
 
 
-@app.get("/agents/{agent_id}", dependencies=[Depends(require_admin_token)])
+@app.get("/agents/{agent_id}", dependencies=[Depends(require_admin_token)], response_model=None)
 def get_agent_by_id(agent_id: str) -> JSONResponse | dict:
     """Single agent (live passthrough to Anthropic)."""
     try:

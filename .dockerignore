@@ -19,3 +19,13 @@ build
 .vscode
 *.log
 README.md
+
+# Trigger.dev project lives alongside the Python service but runs as its own
+# Trigger.dev cloud project, not inside this container. Keep it out of the
+# Python image.
+node_modules
+package.json
+package-lock.json
+trigger.config.ts
+src
+.trigger

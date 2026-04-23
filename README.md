@@ -1,44 +1,44 @@
 # ops-engine-x
 
-**Operational heartbeat** — the routing, scheduling, and orchestration layer of the platform. Domain services (serx-api, oex-api, etc.) emit events here; ops-engine-x decides what each event triggers (a managed agent today, a managed-agents-x-api invocation or a raw HTTP call later) and dispatches.
+**Operational heartbeat** — the routing, scheduling, and orchestration layer of the platform. Domain services (`serx-api`, `oex-api`, etc.) emit events here; ops-engine-x decides what each event triggers (a managed agent via `managed-agents-x` today; other target kinds plug in via the same registry later) and dispatches.
 
 Deployed to Railway as `api.opsengine.run`. Secrets come from Doppler (project `ops-engine-x`).
 
 ## What this service is
 
-- **Event routing** — `POST /events/receive` takes `(source, event_name, event_ref)` from a webhook-ingest app, looks up the route in the `event_routes` table, and dispatches.
+- **Event routing** — `POST /events/receive` takes `(source, event_name, event_ref)` from a webhook-ingest app, looks up the row in `event_routes` to resolve an `agent_id`, and forwards the event to `managed-agents-x`'s invocation gateway (`POST /internal/agents/{agent_id}/invoke`).
 - **Routing-table admin** — CRUD on `event_routes` for whoever manages the mapping (`GET|PUT|DELETE /event-routes/*`).
-- **Health + diagnostics** — `GET /health` (public liveness), `GET /admin/status` (authenticated secret-load probe).
+- **Scheduled dispatch** — `POST /internal/scheduler/tick` fires cron-driven events from the companion Trigger.dev project; rows live in `scheduled_events`, outcomes in `scheduler_runs`.
+- **Health + diagnostics** — `GET /health` (public liveness), `GET /admin/status` (authenticated secret-load + outbound-creds probe).
 
 ## What this service is NOT
 
-- Not a managed-agents product surface. CRUD on agent definitions, system prompts, versioning, drafts, templates, A/B tests, analytics — all of that belongs in the future `managed-agents-x-api` repo.
-- Not a source of truth for agent configs. Anthropic is. ops-engine-x stores only pointers (`agent_id` strings) in its routing table.
-- Not the Anthropic API key holder. **`ANTHROPIC_API_KEY` is not expected in this project's Doppler.**
-
-Some route handlers in `app/main.py` (`/agents*`, `/agents/*/defaults`, `/admin/sync/anthropic`) and their supporting modules (`app/anthropic_client.py`, `app/sync.py`, `app/agent_defaults.py`, `scripts/setup_orchestrator.py`) are preserved verbatim for extraction into `managed-agents-x-api`. They will fail at call time without `ANTHROPIC_API_KEY` — that is the intended state. See `HANDOFF.md` for the full extraction plan.
+- **Not the managed-agents product surface.** CRUD on agent definitions, system prompts, versioning, drafts, templates, A/B tests, analytics all live in [`managed-agents-x`](https://api.managedagents.run).
+- **Not a source of truth for agent configs.** Anthropic is, and `managed-agents-x` mirrors it. ops-engine-x stores only `agent_id` pointers in `event_routes`.
+- **Not the Anthropic API key holder.** `ANTHROPIC_API_KEY` is not in this Doppler and no code here reads it.
+- **Not a session creator.** ops-engine-x never calls Anthropic. All session lifecycle happens inside `managed-agents-x`.
 
 ## Architecture
 
-- **Runtime**: Python 3.12, FastAPI, uvicorn
-- **Secrets**: Doppler (project `ops-engine-x`, config `prd`) is the single source of truth
-- **Deployment**: Railway builds the `Dockerfile`; the only Railway env var is `DOPPLER_TOKEN`
-- **Secret injection**: the container runs `doppler run -- uvicorn ...`, which fetches and injects all Doppler secrets at process start
+- **Runtime**: Python 3.12, FastAPI, uvicorn.
+- **Secrets**: Doppler (project `ops-engine-x`, config `prd`) is the single source of truth.
+- **Deployment**: Railway builds the `Dockerfile`; the only Railway env var is `DOPPLER_TOKEN`.
+- **Secret injection**: the container runs `doppler run -- uvicorn ...`, which fetches and injects all Doppler secrets at process start.
 
-The app is designed to boot successfully even with zero secrets configured. Any feature that needs a secret reads it lazily via `app.config.require("...")` and fails clearly at call time if the secret is missing.
+The app boots successfully with zero secrets configured. Any feature that needs a secret reads it lazily via `app.config.require("...")` or a FastAPI `Depends()` factory and fails clearly at call time if missing.
 
-> **For AI agents working in this repo:** read [`AGENTS.md`](AGENTS.md) and [`HANDOFF.md`](HANDOFF.md) first. They codify the scope boundary, secret-handling conventions, and the "preserved for extraction" freeze on managed-agents code paths.
+> **For AI agents working in this repo:** read [`AGENTS.md`](AGENTS.md) and [`HANDOFF.md`](HANDOFF.md) first. They codify the scope boundary and the secret-handling conventions.
 
 ## Secret contract
 
 The canonical list of secrets lives in [`app/config.py`](app/config.py). No `.env` or `.env.example` is maintained in this repo — Doppler is the source of truth.
 
-Secrets this project **does** expect:
-
 | Name | Required | Notes |
 | ---- | -------- | ----- |
-| `OPEX_AUTH_TOKEN` | required | Inbound bearer token domain services present when calling this service. Gates every non-public route. |
-| `SUPABASE_DB_URL` | required | Postgres connection string backing `event_routes` (and the preserved-for-extraction `agent_defaults`). |
+| `OPEX_AUTH_TOKEN` | inbound, required | Bearer token domain services present when calling this service. Gates every non-public route. |
+| `SUPABASE_DB_URL` | required | Postgres connection string backing `event_routes`, `scheduled_events`, `scheduler_runs`. |
+| `MAG_API_URL` | outbound | Base URL for `managed-agents-x` (e.g. `https://api.managedagents.run`). Required for `/events/receive` to dispatch to agent targets. |
+| `MAG_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling `managed-agents-x`. Paired with `MAG_API_URL`. |
 | `SERX_API_URL` | outbound | Base URL for serx-api. Required whenever a `scheduled_events` row has `target_service='serx'`. |
 | `SERX_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling serx-api. Paired with `SERX_API_URL`. |
 | `OEX_API_URL` | outbound | Base URL for oex-api (e.g. `https://api.outboundengine.dev`). Required whenever a `scheduled_events` row has `target_service='oex'`. |
@@ -48,10 +48,9 @@ Secrets this project **does** expect:
 | `SUPABASE_ANON_KEY` | optional | Reserved. |
 | `SUPABASE_PROJECT_REF` | optional | Supabase project ref slug. |
 
-Secrets this project **does NOT expect** (deliberate):
+Deliberately **not** in this project's Doppler:
 
-- `ANTHROPIC_API_KEY` — lives in the future `managed-agents-x-api` Doppler config, not here.
-- Any outbound service-to-service token (e.g. `MAG_AUTH_TOKEN`) — will be added when ops-engine-x has a reason to call that service. None today.
+- `ANTHROPIC_API_KEY` — held only by `managed-agents-x`. All Anthropic traffic flows through that service.
 
 ## Local development
 
@@ -98,7 +97,8 @@ Smoke test:
 curl localhost:8080/health           # {"status":"ok"}
 curl localhost:8080/                 # {"service":"ops-engine-x","status":"ok"}
 curl -H "Authorization: Bearer $OPEX_AUTH_TOKEN" localhost:8080/admin/status
-# → secrets_loaded: {opex_auth_token: true, supabase_db_url: true}
+# → secrets_loaded: {opex_auth_token, supabase_db_url}
+# → outbound_services: {mag, serx, oex} each reporting url + token presence
 ```
 
 ## Railway deployment

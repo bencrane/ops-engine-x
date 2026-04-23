@@ -14,13 +14,12 @@ Notes on a few specific fields:
   authenticate into this service. It's the one secret the routing surface
   (`/events/receive`, `/event-routes/*`, `/admin/status`) treats as
   required.
-- `anthropic_api_key` is **not** a secret this project is expected to hold.
-  It is present on `Settings` only because the preserved-for-extraction
-  code paths (`app/anthropic_client.py`, `app/sync.py`,
-  `scripts/setup_orchestrator.py`, and the `/agents*` + `/admin/sync/anthropic`
-  route handlers) still reference it. Those code paths will fail clearly via
-  `require("anthropic_api_key")` until they are extracted into
-  `managed-agents-x-api`. Do not add `ANTHROPIC_API_KEY` to this project's
+- `mag_api_url` + `mag_auth_token` are the outbound credentials this
+  service uses to call managed-agents-x's invocation gateway from
+  `/events/receive`. Both are required at call time; registered in
+  `app.service_registry` under slug `mag`.
+- `ANTHROPIC_API_KEY` is **not** held by this project. All Anthropic
+  traffic flows through managed-agents-x. Do not add it to this project's
   Doppler config.
 """
 
@@ -44,13 +43,13 @@ class Settings(BaseSettings):
 
     # Outbound service credentials. Each downstream service ops-engine-x
     # dispatches to needs a matching pair here and an entry in
-    # `app.service_registry`. Slugs currently registered: serx, oex.
+    # `app.service_registry`. Slugs currently registered: mag, serx, oex.
+    mag_api_url: str | None = None
+    mag_auth_token: str | None = None
     serx_api_url: str | None = None
     serx_auth_token: str | None = None
     oex_api_url: str | None = None
     oex_auth_token: str | None = None
-
-    anthropic_api_key: str | None = None
 
 
 settings = Settings()

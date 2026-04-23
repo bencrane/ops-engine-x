@@ -11,11 +11,15 @@ Instructions for AI coding agents working in this repository. Read this, [`READM
 
 ## Scope rule (read HANDOFF.md first)
 
-This service is **operational plumbing** — event routing, scheduled jobs, inbox watchers, workflow orchestration. It is NOT the managed-agents product surface.
+This service is **operational plumbing** — event routing, scheduled-job dispatch, inbox watchers, workflow orchestration. It is NOT the managed-agents product surface.
 
-If a feature touches agent authoring, versioning, editing, drafts, templates, A/B tests, analytics, or the Anthropic API directly → it belongs in the future `managed-agents-x-api` repo, not here. Do not grow those code paths in this repo. See `HANDOFF.md` for the full scope boundary and the list of files preserved verbatim for extraction.
+If a feature touches agent authoring, versioning, editing, drafts, templates, A/B tests, analytics, or the Anthropic API directly → it belongs in [`managed-agents-x`](https://api.managedagents.run), not here.
 
-**Concrete consequence:** do not add `ANTHROPIC_API_KEY` to this project's Doppler config. Do not add new code that calls Anthropic directly. The existing Anthropic-calling code (`app/anthropic_client.py`, `app/sync.py`, `app/agent_defaults.py`, `scripts/setup_orchestrator.py`, and the `/agents*` + `/admin/sync/anthropic` + `/agents/*/defaults` route handlers) is **frozen** — do not refactor, rename, or extend it. It will be extracted.
+**Concrete consequences:**
+- Do NOT add `ANTHROPIC_API_KEY` to this project's Doppler config.
+- Do NOT add code that calls Anthropic. All Anthropic traffic flows through managed-agents-x.
+- Do NOT add code that stores per-agent invocation state (environment_id, vault_ids, task_instruction, system prompt). That's managed-agents-x's `agent_defaults` concern.
+- `event_routes` in this DB stores only `agent_id` pointers — never agent content.
 
 ## Auth rule
 
@@ -31,7 +35,7 @@ def whatever(...): ...
 
 Public routes are limited to `GET /health` and `GET /` (minimal identity). Everything else is gated.
 
-If ops-engine-x ever needs to call a downstream service, add an **outbound** token named after the callee (e.g. `MAG_AUTH_TOKEN` when calling managed-agents-x-api). A token's name always reflects the service it grants access *to*.
+Outbound tokens (ops-engine-x → some other service) are named after the callee: `MAG_AUTH_TOKEN` (managed-agents-x), `SERX_AUTH_TOKEN`, `OEX_AUTH_TOKEN`, etc. Every registered outbound service lives in [`app/service_registry.py`](app/service_registry.py) with its `(url_env, token_env)` pair.
 
 ## Rule 1: Startup must be secret-tolerant
 
@@ -116,7 +120,7 @@ Do **not**:
 
 - Add it to a `.env.example` (there isn't one, and there shouldn't be).
 - Set it in `railway.toml` or Railway's variables UI. `DOPPLER_TOKEN` is the only Railway variable, ever.
-- Add `ANTHROPIC_API_KEY` — that secret does not belong in this project's Doppler. See the scope rule above.
+- Add `ANTHROPIC_API_KEY` — that secret lives in managed-agents-x's Doppler, not here.
 
 ## Rule 4: Don't touch the Doppler injection path
 

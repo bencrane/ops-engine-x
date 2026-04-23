@@ -36,6 +36,11 @@ class ServiceRegistration:
 # and never appear in user-facing URLs \u2014 they're the internal key used by
 # scheduled_events.target_service (and future routing tables).
 _REGISTRY: dict[str, ServiceRegistration] = {
+    "mag": ServiceRegistration(
+        slug="mag",
+        base_url_env="MAG_API_URL",
+        auth_token_env="MAG_AUTH_TOKEN",
+    ),
     "serx": ServiceRegistration(
         slug="serx",
         base_url_env="SERX_API_URL",

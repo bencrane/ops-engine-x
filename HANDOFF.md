@@ -59,63 +59,40 @@ serx-api, oex-api, etc. ─→ api.opsengine.run ───┬──→ managed-a
 - **Domain service callers** (`serx-webhook-ingest`, `oex-webhook-ingest`) have been updated to use `OPEX_AUTH_TOKEN` and point at `api.opsengine.run`.
 - **Naming convention decided:** `-api` suffix = HTTP API service; no suffix = other runtime shape (job runner, daemon). Trigger.dev project is `ops-engine-x` (no `-api`). `-x` is an internal namespace token, never appears in user-facing URLs.
 
-## Preserved for extraction (do NOT modify)
+## Extraction status — DONE
 
-The following code and endpoints currently live in this repo but belong conceptually to the future `managed-agents-x-api` service. They are preserved verbatim so the agent building that repo can extract them cleanly. Do not delete, refactor, rename, or grow them here:
+All Anthropic / managed-agents code has been extracted out of this repo and into [`managed-agents-x`](https://api.managedagents.run). The code that used to live here (`app/anthropic_client.py`, `app/sync.py`, `app/agent_defaults.py`, `scripts/setup_orchestrator.py`, `/agents*` route handlers, `/admin/sync/anthropic`) is gone. The `agents`, `agent_versions`, and `agent_defaults` tables have been dropped from this project's Supabase DB.
 
-- `app/anthropic_client.py` — Anthropic managed-agents HTTP client.
-- `app/sync.py` — reconciles Anthropic agent state into local DB.
-- `app/agent_defaults.py` — `agent_defaults` table CRUD (per-agent `environment_id`, `vault_ids`, `task_instruction`).
-- `scripts/setup_orchestrator.py` — one-shot orchestrator-agent creation script.
-- `DIRECTIVE_BOOTSTRAP_DB.md`, `MANAGED-AGENTS-BRIEF.md` — handoff artifacts for the future repo.
-- The `anthropic/` reference folder (Anthropic's own docs).
-- Route handlers in `app/main.py`: `GET /agents`, `GET /agents/{agent_id}`, `GET|PUT|DELETE /agents/{agent_id}/defaults`, `GET /agents/defaults`, `POST /admin/sync/anthropic`.
-
-At runtime, these endpoints will return clear errors (missing `ANTHROPIC_API_KEY`) — that is expected. Do not add `ANTHROPIC_API_KEY` to this project's Doppler to "fix" it. The fix is extraction into `managed-agents-x-api`.
+`POST /events/receive` is wired to HTTP-forward agent-kind events to `managed-agents-x`'s invocation gateway (`POST /internal/agents/{agent_id}/invoke`) via the `mag` entry in `app/service_registry.py`.
 
 ---
 
-## Roadmap — ordered work
+## Completed milestones
 
-### Phase 1 — Finish the rename cleanly (IN PROGRESS / MOSTLY DONE)
+### Phase 1 — Rename to ops-engine-x (DONE)
 
-1. **Doppler secrets migration — DONE.** `ops-engine-x/prd` populated with `OPEX_AUTH_TOKEN`, `SUPABASE_DB_URL`, and related Supabase keys. `ANTHROPIC_API_KEY` intentionally excluded.
-2. **Railway `DOPPLER_TOKEN` — DONE.** Service token for `ops-engine-x/prd` is in Railway.
-3. **Source code sweep — DONE (this pass).** Files updated:
-   - `app/config.py` — secret field renamed `mag_auth_token` → `opex_auth_token`, `anthropic_api_key` kept but no longer documented as expected (preserved-for-extraction code still references it and will fail clearly at call time).
-   - `app/deps.py` — `require_admin_token` validates `OPEX_AUTH_TOKEN`.
-   - `app/main.py` — service title + `/` payload updated; `/` slimmed; authenticated `GET /admin/status` added with secrets-loaded probe; `/agents*` + `/admin/sync/anthropic` + `/agents/*/defaults` handlers left intact per preservation rule.
-   - `app/event_routes.py` — module docstring updated to reflect ops-engine-x scope.
-   - `docker-entrypoint.sh` — header comment updated.
-   - `docs/webhook-routing-architecture.md` — rewritten to use `ops-engine-x` + `OPEX_AUTH_TOKEN`.
-   - `README.md`, `AGENTS.md` — scope reframed from "managed-agents backend" to "operational heartbeat / event routing".
-   - **Not touched** (preservation rule): `anthropic/**`, `app/anthropic_client.py`, `app/sync.py`, `app/agent_defaults.py`, `scripts/setup_orchestrator.py`, `DIRECTIVE_BOOTSTRAP_DB.md`, `MANAGED-AGENTS-BRIEF.md`. These carry stale `managed-agents-x-api` references intentionally — they are extraction hand-off artifacts.
-4. **Caller cutover — DONE.** Domain services re-pointed at `api.opsengine.run` with the new `OPEX_AUTH_TOKEN`.
-5. **GitHub repo description** — still says `"managed-agents-x-api"`; update when convenient.
+- Doppler project `ops-engine-x` populated; `managed-agents-x-api` Doppler kept and repurposed as the managed-agents-x project's Doppler.
+- Railway service running at `api.opsengine.run`, only env var is `DOPPLER_TOKEN`.
+- Source code sweep: scope reframed from "managed-agents backend" to "operational heartbeat / event routing." Auth token renamed `MAG_AUTH_TOKEN` → `OPEX_AUTH_TOKEN`. Inbound auth standardized on `require_opex_auth`.
+- Domain service callers (`serx-webhook-ingest`, `oex-webhook-ingest`) re-pointed at `api.opsengine.run` with `OPEX_AUTH_TOKEN`.
 
-### Phase 2 — Clean up stale data model (SOON)
+### Phase 2 — Stale data model cleanup (DONE)
 
-6. **Delete stale agent-definition tables** in ops-engine-x's Supabase DB.
-   - Anthropic is the source of truth for agent configs.
-   - These tables are currently stale and actively misleading.
-   - What stays in ops-engine-x's DB re: agents: **only an `event_routes` (or similar) table mapping `(event_type, provider) → target` where target is either an `agent_id` string or an external API call spec.**
-   - Any system prompts, tool configs, agent metadata currently in this DB: delete.
-7. **Inventory the Anthropic-calling code** in this repo (`app/anthropic_client.py`, any `/agents` endpoints, `agent_defaults.py`, etc.) and mark it as "to be extracted." Do NOT extract yet. Do NOT build more of it here.
+- `agents`, `agent_versions`, `agent_defaults` tables dropped from this project's Supabase DB.
+- What stays in this DB: `event_routes` (routing decisions), `scheduled_events` (cron registry), `scheduler_runs` (cron dispatch log).
 
-### Phase 3 — Build managed-agents-x (IN PROGRESS)
+### Phase 3 — Build managed-agents-x (DONE)
 
-8. **Sanity-check Anthropic's API** for what it supports natively. Read `anthropic/managed-agents/` docs in this repo before designing the managed-agents-x data model. Some product features (versioning, drafts) may have Anthropic primitives that shape the design. — **DONE in the managed-agents-x repo's bootstrap work.**
-9. **New `managed-agents-x` repo exists, deployed to Railway.** Its own Doppler project holds `ANTHROPIC_API_KEY`, Supabase creds, and the inbound auth token. `api.managedagents.run` DNS now points at that service (not ops-engine-x anymore).
-10. **Extract Anthropic-calling code** from ops-engine-x → managed-agents-x. The files listed under "Preserved for extraction" above are being ported over as-is. Until extraction lands, the `/agents*` and `/admin/sync/anthropic` handlers here continue to fail at call time (no `ANTHROPIC_API_KEY` in this Doppler) — intentional.
-11. **Introduce the invocation gateway** in managed-agents-x (e.g. `POST /internal/agents/{agent_id}/invoke`) that wraps `create_session` + `send_user_message`. Service-to-service auth: ops-engine-x holds an outbound token (name TBD, e.g. `MAX_AUTH_TOKEN`) in its Doppler, managed-agents-x holds the matching inbound token in its own Doppler.
-12. **Rewire `POST /events/receive`** in this repo: replace the inline `app.anthropic_client.create_session` + `send_user_message` calls with an HTTP call to managed-agents-x's invocation endpoint. Once that lands, the "Preserved for extraction" files here can be deleted.
-13. **Build out product features** (versioning, drafts, templates, A/B tests, tool configurators, analytics) in managed-agents-x.
+- New repo deployed to Railway, reachable at `api.managedagents.run`.
+- Its own Doppler project holds `ANTHROPIC_API_KEY`, Supabase creds, and `MAG_AUTH_TOKEN` (inbound).
+- Anthropic client, `agent_defaults` CRUD, sync, and the `setup_orchestrator` scaffolder all live in managed-agents-x now.
+- Invocation gateway endpoint live: `POST /internal/agents/{agent_id}/invoke`. Accepts `(source, event_name, event_ref, title?, idempotency_key?)`, does its own `agent_defaults` lookup, formats kickoff, creates Anthropic session, returns session metadata.
 
-### Phase 4 — Layer in trigger.dev (PARALLEL TO PHASE 3)
+### Phase 4 — Scheduled dispatch via Trigger.dev (DONE for initial tasks)
 
-15. **Set up Trigger.dev project `ops-engine-x`** (no `-api` — not an API).
-16. Write scheduled job definitions (inbox watchers, periodic checks, etc.) that call ops-engine-x's API over HTTP.
-17. Use ops-engine-x's Doppler project for any secrets Trigger.dev jobs need.
+- Trigger.dev project `ops-engine-x` active. Tasks call `POST /internal/scheduler/tick` on ops-engine-x with `(event_id, trigger_run_id)`. ops-engine-x resolves `scheduled_events[event_id]` → `service_registry.resolve(target_service)` → HTTP call → `scheduler_runs` log row.
+- Live tasks: `serx.dispatch_due_preframes` (every 6 hours), `oex.auth_me_probe` (daily reachability/auth check).
+- Scheduler now supports both GET and POST dispatch (`http_method` column on `scheduled_events`, default POST).
 
 ---
 
@@ -136,12 +113,13 @@ At runtime, these endpoints will return clear errors (missing `ANTHROPIC_API_KEY
 
 ---
 
-## Open questions / decisions deferred
+## Open threads
 
-- **Exact schema for the event_routes table** — not yet designed. Needs to handle both agent targets and non-agent API call targets cleanly.
-- **Service-to-service auth mechanism** — JWT? Static bearer tokens stored in Doppler? TBD when we build the first cross-service call.
-- **Whether `managed-agents-x-api` repo name keeps the dashes or goes to `managedagents-x-api`** — defer until repo creation; Doppler project already uses dashed form.
-- **Observability/logging** stack — not set up yet across services.
+- **`event_routes` generalization.** Today the table is `(source, event_name, agent_id, enabled)` — 100% of routes target an agent. When the second target kind appears (raw HTTP call, Trigger.dev task run, etc.), generalize to `(source, event_name, target_kind, target_spec jsonb, enabled)` and branch in `receive_event` on `target_kind`. Don't pre-generalize.
+- **Idempotency on the receiver side.** ops-engine-x currently passes `idempotency_key = event_ref.id` downstream. If webhook-ingest providers re-send the same webhook (retries, replay), managed-agents-x's invocation_log de-dupes. ops-engine-x itself does no idempotency check today — if needed, add one at the `event_routes` lookup.
+- **Observability.** No centralized logging/tracing stack yet. Today's inspection is `/internal/scheduler/runs` for scheduled dispatches and Trigger.dev's run log for its side. Inbound `/events/receive` calls have no persistent audit trail — if that becomes needed, add an `events_received` table.
+- **GitHub repo description** still says `"managed-agents-x-api"` — cosmetic, update when convenient.
+- **Docs trim.** `docs/webhook-routing-architecture.md` predates the extraction and still describes parts of the system that now live in managed-agents-x (orchestrator system prompts, agent wake-up behavior, MCP hydration). Worth pruning to just the ops-engine-x concern (inbound contract + routing) once someone has an hour.
 
 ---
 
@@ -150,5 +128,4 @@ At runtime, these endpoints will return clear errors (missing `ANTHROPIC_API_KEY
 Start here:
 1. Read this file.
 2. Read `AGENTS.md` for repo-level conventions.
-3. Ask the user which Phase 1 step they want to tackle first. Recommended order: Doppler migration → token rotation → source code sweep → README/AGENTS reframe → GitHub description. Do each as a discrete, verifiable step.
-4. Do not proactively start Phase 2+ work without the user's go-ahead.
+3. Ask the user what they want to tackle. The extraction is done; remaining work is operational (add a new source, a new target_kind, a new scheduled task) or quality-of-life (observability, docs trim).

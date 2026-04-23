@@ -28,9 +28,3 @@ def require_opex_auth(authorization: str | None = Header(default=None)) -> None:
     provided = authorization.split(" ", 1)[1].strip()
     if not secrets.compare_digest(provided, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-
-
-# Backwards-compatible alias kept so existing imports in preserved-for-extraction
-# route handlers (e.g. `/agents*`, `/admin/sync/anthropic`) keep working without
-# being modified. New code should import `require_opex_auth` directly.
-require_admin_token = require_opex_auth

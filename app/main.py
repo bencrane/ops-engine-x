@@ -1,18 +1,21 @@
 """FastAPI entrypoint for ops-engine-x.
 
-ops-engine-x is the operational-heartbeat service: event routing from
-domain-service webhook ingests to downstream targets (today: managed agents
-via Anthropic; later: a managed-agents gateway and non-agent HTTP targets),
-plus the admin surface for the routing table.
+ops-engine-x is the operational-heartbeat service: it receives inbound
+events from webhook-ingest callers, looks up a routing decision in its
+`event_routes` table, and hands off to the right downstream service.
+Today every route targets a managed agent, invoked via managed-agents-x.
+Tomorrow other `target_kind`s (raw HTTP calls, Trigger.dev task runs,
+etc.) plug into the same dispatch surface.
+
+ops-engine-x never creates Anthropic sessions and never holds
+`ANTHROPIC_API_KEY`. The session lifecycle and all agent-product state
+(agent_defaults, system prompts, vaults, versions) live entirely in
+managed-agents-x. This service's job is routing plumbing.
 
 The app must start successfully with zero secrets configured. Any feature
-that requires a secret reads it lazily via `app.config.require(...)`.
-
-Inbound auth is `OPEX_AUTH_TOKEN` (bearer), checked via
-`app.deps.require_opex_auth`. Some handlers below are preserved verbatim for
-extraction into the future `managed-agents-x-api` repo — they will fail at
-call time without `ANTHROPIC_API_KEY`, which is intentional (this project's
-Doppler does not hold that secret).
+that requires a secret reads it lazily (see `app.config.require()` or a
+FastAPI `Depends()` factory). Inbound auth is `OPEX_AUTH_TOKEN` (bearer),
+checked via `app.deps.require_opex_auth`.
 """
 
 from __future__ import annotations
@@ -27,40 +30,12 @@ from pydantic import BaseModel, Field
 
 import json
 
-from app import agent_defaults as agent_defaults_store
 from app import event_routes as event_routes_store
 from app import scheduled_events as scheduled_events_store
 from app import scheduler_runs as scheduler_runs_store
 from app import service_registry
-from app.anthropic_client import create_session, get_agent, list_agents, send_user_message
 from app.config import MissingSecretError, settings
-from app.deps import require_admin_token, require_opex_auth
-from app.sync import sync_from_anthropic
-
-
-class AgentDefaultsPayload(BaseModel):
-    environment_id: str = Field(..., min_length=1)
-    vault_ids: list[str] = Field(default_factory=list)
-    task_instruction: str | None = Field(
-        default=None,
-        description=(
-            "Optional per-agent kickoff preamble prepended to the user.message "
-            "sent when /events/receive fires. Use this to give the agent "
-            "a short, durable job description that sits above the event payload."
-        ),
-    )
-
-
-class AgentDefaults(BaseModel):
-    agent_id: str
-    environment_id: str
-    vault_ids: list[str]
-    task_instruction: str | None = None
-
-
-class AgentDefaultsList(BaseModel):
-    data: list[AgentDefaults]
-    count: int
+from app.deps import require_opex_auth
 
 
 class DeleteResult(BaseModel):
@@ -178,11 +153,12 @@ class TickResult(BaseModel):
 
 app = FastAPI(
     title="ops-engine-x",
-    version="0.1.0",
+    version="0.2.0",
     description=(
-        "Operational-heartbeat service. Routes events from domain-service webhook "
-        "ingests to downstream targets (managed agents today; managed-agents-x-api "
-        "and non-agent HTTP targets later). All non-public routes require a bearer "
+        "Operational-heartbeat service. Receives events from domain-service "
+        "webhook ingests and routes them to downstream targets (managed agents "
+        "via managed-agents-x today; future non-agent targets plug in via the "
+        "same event_routes registry). All non-public routes require a bearer "
         "OPEX_AUTH_TOKEN."
     ),
 )
@@ -228,101 +204,28 @@ def admin_status() -> dict[str, object]:
     }
 
 
-@app.post("/admin/sync/anthropic", dependencies=[Depends(require_admin_token)])
-def admin_sync_anthropic() -> dict[str, object]:
-    """Pull all managed agents from Anthropic and reconcile into the DB."""
-    return sync_from_anthropic().as_dict()
-
-
-def _passthrough_upstream_error(exc: httpx.HTTPStatusError) -> JSONResponse:
-    try:
-        body = exc.response.json()
-    except ValueError:
-        body = {"detail": exc.response.text or "Upstream Anthropic error"}
-    return JSONResponse(status_code=exc.response.status_code, content=body)
-
-
-@app.get(
-    "/agents/defaults",
-    dependencies=[Depends(require_admin_token)],
-    response_model=AgentDefaultsList,
-)
-def list_agent_defaults() -> AgentDefaultsList:
-    """List every agent_defaults row (frontend merges with /agents client-side)."""
-    rows = agent_defaults_store.list_all()
-    return AgentDefaultsList(data=[AgentDefaults(**r) for r in rows], count=len(rows))
-
-
-@app.get(
-    "/agents/{agent_id}/defaults",
-    dependencies=[Depends(require_admin_token)],
-    response_model=AgentDefaults,
-)
-def get_agent_defaults(agent_id: str) -> AgentDefaults:
-    row = agent_defaults_store.get(agent_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="No defaults configured for this agent")
-    return AgentDefaults(**row)
-
-
-@app.put(
-    "/agents/{agent_id}/defaults",
-    dependencies=[Depends(require_admin_token)],
-    response_model=AgentDefaults,
-)
-def put_agent_defaults(agent_id: str, payload: AgentDefaultsPayload) -> AgentDefaults:
-    row = agent_defaults_store.upsert(
-        agent_id,
-        payload.environment_id,
-        payload.vault_ids,
-        payload.task_instruction,
-    )
-    return AgentDefaults(**row)
-
-
-@app.delete(
-    "/agents/{agent_id}/defaults",
-    dependencies=[Depends(require_admin_token)],
-    response_model=DeleteResult,
-)
-def delete_agent_defaults(agent_id: str) -> DeleteResult:
-    deleted = agent_defaults_store.delete(agent_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="No defaults configured for this agent")
-    return DeleteResult(deleted=True)
-
-
-def _format_event_message(
-    source: str,
-    event_name: str,
-    event_ref: EventRef,
-    task_instruction: str | None = None,
-) -> str:
-    body = (
-        f"source: {source}\n"
-        f"event_name: {event_name}\n"
-        f"event_ref: {json.dumps(event_ref.model_dump())}\n"
-    )
-    if task_instruction:
-        return f"{task_instruction.rstrip()}\n\n{body}"
-    return body
-
-
 @app.post(
     "/events/receive",
     dependencies=[Depends(require_opex_auth)],
-    response_model=ReceiveEventResult,
+    response_model=None,
 )
-def receive_event(body: ReceiveEventPayload) -> ReceiveEventResult:
+def receive_event(body: ReceiveEventPayload) -> JSONResponse:
     """Receive an inbound event from a webhook-ingest caller and dispatch.
 
     The caller sends `(source, event_name, event_ref)` \u2014 a pointer to the
     raw webhook payload stored in its own DB. ops-engine-x looks up the
-    matching row in `event_routes`, resolves the target agent, and today
-    fires the managed-agent session inline via the preserved-for-extraction
-    Anthropic client. Post-extraction this handler shrinks to an HTTP call
-    against managed-agents-x's invocation gateway; the endpoint's public
-    contract does not change across that cutover.
+    matching row in `event_routes` to resolve `agent_id`, then HTTP-forwards
+    the event to managed-agents-x's invocation gateway. managed-agents-x
+    owns agent_defaults lookup, Anthropic session creation, and kickoff
+    message formatting.
+
+    Error surface:
+    - 404: no `event_route` for `(source, event_name)`.
+    - 409: `event_route` exists but is disabled.
+    - 500: `service_registry` has no `mag` slug (config bug).
+    - 503: `MAG_API_URL` or `MAG_AUTH_TOKEN` not set in this project's Doppler.
+    - 502: managed-agents-x unreachable (DNS, TCP, TLS, timeout).
+    - Passthrough: any 2xx/4xx/5xx managed-agents-x returns, body verbatim.
     """
     route = event_routes_store.resolve(body.source, body.event_name)
     if route is None:
@@ -337,58 +240,43 @@ def receive_event(body: ReceiveEventPayload) -> ReceiveEventResult:
         )
 
     agent_id = route["agent_id"]
-    defaults = agent_defaults_store.get(agent_id)
-    if defaults is None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"No agent_defaults configured for agent_id={agent_id}",
-        )
-
-    metadata = {
-        "source": body.source,
-        "event_name": body.event_name,
-        "event_ref_store": body.event_ref.store,
-        "event_ref_id": body.event_ref.id,
-    }
-    title = body.title or f"{body.source}:{body.event_name}"
 
     try:
-        session = create_session(
-            agent_id=agent_id,
-            environment_id=defaults["environment_id"],
-            vault_ids=defaults["vault_ids"],
-            title=title,
-            metadata=metadata,
-        )
-    except httpx.HTTPStatusError as exc:
-        return _passthrough_upstream_error(exc)  # type: ignore[return-value]
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"create_session failed: {exc}") from exc
+        target = service_registry.resolve("mag")
+    except KeyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except MissingSecretError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    target_url = f"{target.base_url}/internal/agents/{agent_id}/invoke"
 
     try:
-        send_user_message(
-            session_id=session["id"],
-            text=_format_event_message(
-                body.source,
-                body.event_name,
-                body.event_ref,
-                defaults.get("task_instruction"),
-            ),
-        )
-    except httpx.HTTPStatusError as exc:
-        return _passthrough_upstream_error(exc)  # type: ignore[return-value]
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                target_url,
+                headers={
+                    "Authorization": f"Bearer {target.auth_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "source":          body.source,
+                    "event_name":      body.event_name,
+                    "event_ref":       body.event_ref.model_dump(),
+                    "title":           body.title,
+                    "idempotency_key": body.event_ref.id,
+                },
+            )
     except httpx.HTTPError as exc:
         raise HTTPException(
-            status_code=502, detail=f"send_user_message failed: {exc}"
+            status_code=502,
+            detail=f"managed-agents-x unreachable: {type(exc).__name__}: {exc}",
         ) from exc
 
-    return ReceiveEventResult(
-        session_id=session["id"],
-        agent_id=agent_id,
-        environment_id=defaults["environment_id"],
-        vault_ids=defaults["vault_ids"],
-        status=session.get("status", "unknown"),
-    )
+    try:
+        content: Any = resp.json()
+    except ValueError:
+        content = {"detail": resp.text or "Upstream managed-agents-x error"}
+    return JSONResponse(status_code=resp.status_code, content=content)
 
 
 @app.get(
@@ -608,24 +496,3 @@ def _parse_summary(raw: str) -> Any | None:
         return {"raw_text": text, "truncated": len(raw) > max_bytes}
 
 
-@app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)
-def get_agents() -> JSONResponse | dict[str, object]:
-    """List all managed agents (live passthrough to Anthropic, paginated server-side)."""
-    try:
-        agents = list(list_agents())
-    except httpx.HTTPStatusError as exc:
-        return _passthrough_upstream_error(exc)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc
-    return {"data": agents, "count": len(agents)}
-
-
-@app.get("/agents/{agent_id}", dependencies=[Depends(require_admin_token)], response_model=None)
-def get_agent_by_id(agent_id: str) -> JSONResponse | dict:
-    """Single agent (live passthrough to Anthropic)."""
-    try:
-        return get_agent(agent_id)
-    except httpx.HTTPStatusError as exc:
-        return _passthrough_upstream_error(exc)
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Upstream request failed: {exc}") from exc

@@ -9,16 +9,28 @@ from fastapi import Header, HTTPException, status
 from app.config import settings
 
 
-def require_admin_token(authorization: str | None = Header(default=None)) -> None:
-    """Bearer-token gate for admin-only endpoints using MAG_AUTH_TOKEN from Doppler."""
-    expected = settings.mag_auth_token
+def require_opex_auth(authorization: str | None = Header(default=None)) -> None:
+    """Bearer-token gate using OPEX_AUTH_TOKEN from Doppler.
+
+    This is the inbound auth check for every non-public route in ops-engine-x.
+    `OPEX_AUTH_TOKEN` grants access *into* this service; domain services
+    (serx-webhook-ingest, oex-webhook-ingest, etc.) present it when calling
+    `POST /sessions/from-event` and friends.
+    """
+    expected = settings.opex_auth_token
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="MAG_AUTH_TOKEN not configured (check Doppler).",
+            detail="OPEX_AUTH_TOKEN not configured (check Doppler).",
         )
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     provided = authorization.split(" ", 1)[1].strip()
     if not secrets.compare_digest(provided, expected):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+# Backwards-compatible alias kept so existing imports in preserved-for-extraction
+# route handlers (e.g. `/agents*`, `/admin/sync/anthropic`) keep working without
+# being modified. New code should import `require_opex_auth` directly.
+require_admin_token = require_opex_auth

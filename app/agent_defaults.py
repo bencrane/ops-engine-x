@@ -16,48 +16,64 @@ class AgentDefaults(TypedDict):
     agent_id: str
     environment_id: str
     vault_ids: list[str]
+    task_instruction: str | None
+
+
+_COLS = "agent_id, environment_id, vault_ids, task_instruction"
+
+
+def _row_to_dict(row) -> AgentDefaults:
+    return {
+        "agent_id": row[0],
+        "environment_id": row[1],
+        "vault_ids": list(row[2] or []),
+        "task_instruction": row[3],
+    }
 
 
 def get(agent_id: str) -> AgentDefaults | None:
     with connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "select agent_id, environment_id, vault_ids from agent_defaults where agent_id = %s",
+            f"select {_COLS} from agent_defaults where agent_id = %s",
             (agent_id,),
         )
         row = cur.fetchone()
     if not row:
         return None
-    return {"agent_id": row[0], "environment_id": row[1], "vault_ids": list(row[2] or [])}
+    return _row_to_dict(row)
 
 
 def list_all() -> list[AgentDefaults]:
     with connect() as conn, conn.cursor() as cur:
-        cur.execute("select agent_id, environment_id, vault_ids from agent_defaults order by agent_id")
+        cur.execute(f"select {_COLS} from agent_defaults order by agent_id")
         rows = cur.fetchall()
-    return [
-        {"agent_id": r[0], "environment_id": r[1], "vault_ids": list(r[2] or [])}
-        for r in rows
-    ]
+    return [_row_to_dict(r) for r in rows]
 
 
-def upsert(agent_id: str, environment_id: str, vault_ids: list[str]) -> AgentDefaults:
+def upsert(
+    agent_id: str,
+    environment_id: str,
+    vault_ids: list[str],
+    task_instruction: str | None = None,
+) -> AgentDefaults:
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                insert into agent_defaults (agent_id, environment_id, vault_ids)
-                values (%s, %s, %s)
+                f"""
+                insert into agent_defaults (agent_id, environment_id, vault_ids, task_instruction)
+                values (%s, %s, %s, %s)
                 on conflict (agent_id) do update set
                     environment_id = excluded.environment_id,
                     vault_ids = excluded.vault_ids,
+                    task_instruction = excluded.task_instruction,
                     updated_at = now()
-                returning agent_id, environment_id, vault_ids
+                returning {_COLS}
                 """,
-                (agent_id, environment_id, vault_ids),
+                (agent_id, environment_id, vault_ids, task_instruction),
             )
             row = cur.fetchone()
         conn.commit()
-    return {"agent_id": row[0], "environment_id": row[1], "vault_ids": list(row[2] or [])}
+    return _row_to_dict(row)
 
 
 def delete(agent_id: str) -> bool:

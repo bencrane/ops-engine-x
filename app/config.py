@@ -2,12 +2,26 @@
 
 This file is the canonical list of environment variables the app expects.
 Values are injected at runtime by `doppler run --` (via the Doppler CLI in
-the container) from the Doppler project `managed-agents-x-api`, config `prd`.
+the container) from the Doppler project `ops-engine-x`, config `prd`.
 
 Design rule: every field must be tolerant of being missing at import time.
 The app must boot and `/health` must return 200 even if Doppler is
 unreachable or a variable is unset. Required secrets are validated lazily
 at the call site that actually needs them (see `require()`).
+
+Notes on a few specific fields:
+- `opex_auth_token` is the inbound bearer token domain services use to
+  authenticate into this service. It's the one secret the routing surface
+  (`/sessions/from-event`, `/event-routes/*`, `/admin/status`) treats as
+  required.
+- `anthropic_api_key` is **not** a secret this project is expected to hold.
+  It is present on `Settings` only because the preserved-for-extraction
+  code paths (`app/anthropic_client.py`, `app/sync.py`,
+  `scripts/setup_orchestrator.py`, and the `/agents*` + `/admin/sync/anthropic`
+  route handlers) still reference it. Those code paths will fail clearly via
+  `require("anthropic_api_key")` until they are extracted into
+  `managed-agents-x-api`. Do not add `ANTHROPIC_API_KEY` to this project's
+  Doppler config.
 """
 
 from __future__ import annotations
@@ -21,13 +35,14 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    anthropic_api_key: str | None = None
+    opex_auth_token: str | None = None
     supabase_url: str | None = None
     supabase_service_role_key: str | None = None
     supabase_anon_key: str | None = None
     supabase_db_url: str | None = None
     supabase_project_ref: str | None = None
-    mag_auth_token: str | None = None
+
+    anthropic_api_key: str | None = None
 
 
 settings = Settings()
@@ -41,7 +56,7 @@ def require(name: str) -> str:
     """Fetch a required secret by attribute name, raising a clear error if unset.
 
     Use this at the call site of any feature that genuinely needs the secret,
-    e.g. `api_key = require("anthropic_api_key")`. This keeps startup tolerant
+    e.g. `token = require("opex_auth_token")`. This keeps startup tolerant
     while failing loudly and clearly when a feature is exercised without its
     required configuration.
     """
@@ -49,7 +64,7 @@ def require(name: str) -> str:
     if not value:
         raise MissingSecretError(
             f"Required secret '{name.upper()}' is not set. "
-            "Confirm it exists in Doppler (project: managed-agents-x-api, "
+            "Confirm it exists in Doppler (project: ops-engine-x, "
             "config: prd) and that DOPPLER_TOKEN is valid."
         )
     return value

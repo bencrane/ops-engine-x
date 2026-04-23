@@ -1,11 +1,12 @@
 #!/bin/sh
-# Entrypoint for managed-agents-x-api.
+# Entrypoint for ops-engine-x.
 #
 # In production (Railway), DOPPLER_TOKEN is set and secrets are injected
-# via `doppler run --`. If DOPPLER_TOKEN is not set (e.g. local `docker run`
-# without a token), the container still boots — the app tolerates missing
-# secrets at startup. This keeps the "app launches without knowing what is
-# in Doppler" guarantee intact even at the container layer.
+# via `doppler run --` from the `ops-engine-x` Doppler project. If
+# DOPPLER_TOKEN is not set (e.g. local `docker run` without a token), the
+# container still boots — the app tolerates missing secrets at startup.
+# This keeps the "app launches without knowing what is in Doppler"
+# guarantee intact even at the container layer.
 
 set -e
 

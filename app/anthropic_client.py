@@ -50,3 +50,37 @@ def get_agent(agent_id: str) -> dict:
         resp = client.get(f"/v1/agents/{agent_id}", headers=_headers())
         resp.raise_for_status()
         return resp.json()
+
+
+def create_session(
+    agent_id: str,
+    environment_id: str,
+    vault_ids: list[str] | None = None,
+    title: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> dict:
+    body: dict = {"agent": agent_id, "environment_id": environment_id}
+    if vault_ids:
+        body["vault_ids"] = vault_ids
+    if title:
+        body["title"] = title
+    if metadata:
+        body["metadata"] = metadata
+    with httpx.Client(base_url=BASE_URL, timeout=30.0) as client:
+        resp = client.post("/v1/sessions", headers=_headers(), json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+
+def send_user_message(session_id: str, text: str) -> dict:
+    body = {
+        "events": [
+            {"type": "user.message", "content": [{"type": "text", "text": text}]}
+        ]
+    }
+    with httpx.Client(base_url=BASE_URL, timeout=30.0) as client:
+        resp = client.post(
+            f"/v1/sessions/{session_id}/events", headers=_headers(), json=body
+        )
+        resp.raise_for_status()
+        return resp.json()

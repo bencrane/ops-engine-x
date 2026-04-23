@@ -38,11 +38,11 @@ class ServiceRegistration:
 _REGISTRY: dict[str, ServiceRegistration] = {
     "serx": ServiceRegistration(
         slug="serx",
-        base_url_env="SERX_API_BASE_URL",
+        base_url_env="SERX_API_URL",
         auth_token_env="SERX_AUTH_TOKEN",
     ),
     # Future slugs, add when those services come online:
-    # "oex": ServiceRegistration("oex", "OEX_API_BASE_URL", "OEX_AUTH_TOKEN"),
+    # "oex": ServiceRegistration("oex", "OEX_API_URL", "OEX_AUTH_TOKEN"),
     # "opex" (self-call) intentionally omitted until we actually need a
     # scheduled job that hits an ops-engine-x internal endpoint. When that
     # comes, prefer an in-process dispatch helper over HTTP loopback.

@@ -28,7 +28,7 @@ a new environment variable here.
 Key properties:
 
 - **One source of truth for routing.** `scheduled_events` (in ops-engine-x's Supabase) maps `event_id → (target_service, target_path, enabled)`. Operators can disable or re-point a schedule with a SQL update; no Trigger.dev redeploy required.
-- **Target-service credentials never leave ops-engine-x.** `SERX_AUTH_TOKEN`, `SERX_API_BASE_URL`, and their future siblings live in ops-engine-x's Doppler. Adding a new target service = one row in `app/service_registry.py` + two secrets in Doppler.
+- **Target-service credentials never leave ops-engine-x.** `SERX_AUTH_TOKEN`, `SERX_API_URL`, and their future siblings live in ops-engine-x's Doppler. Adding a new target service = one row in `app/service_registry.py` + two secrets in Doppler.
 - **ops-engine-x owns the run log.** Every dispatch (success or failure) appends a row to `scheduler_runs` in-process. No extra HTTP call, no best-effort fallback.
 - **Trigger.dev is pure timing.** Each task = `id + cron + fireScheduledEvent(id, ctx.run.id)`. Nothing else.
 
@@ -72,10 +72,10 @@ Target-service credentials live here. The dispatcher reads them through
 
 | Variable | Purpose |
 |---|---|
-| `SERX_API_BASE_URL` | e.g. `https://api.serviceengine.xyz` |
+| `SERX_API_URL` | e.g. `https://api.serviceengine.xyz` |
 | `SERX_AUTH_TOKEN` | serx-api's inbound bearer |
 
-Future targets (`oex`, etc.) follow the same `<SLUG>_API_BASE_URL` /
+Future targets (`oex`, etc.) follow the same `<SLUG>_API_URL` /
 `<SLUG>_AUTH_TOKEN` pattern.
 
 ## Registering a new scheduled event
@@ -86,7 +86,7 @@ Future targets (`oex`, etc.) follow the same `<SLUG>_API_BASE_URL` /
 4. `npx trigger.dev@latest deploy`.
 
 If the target service is new, first add it to `app/service_registry.py` and
-add its two secrets (`<SLUG>_API_BASE_URL`, `<SLUG>_AUTH_TOKEN`) to
+add its two secrets (`<SLUG>_API_URL`, `<SLUG>_AUTH_TOKEN`) to
 ops-engine-x's Doppler. Redeploy ops-engine-x once, never again for that
 service.
 

@@ -1,113 +1,130 @@
-# Trigger.dev — ops-engine-x scheduled jobs
+# Trigger.dev — ops-engine-x scheduled events
 
 This directory holds the Trigger.dev task definitions for the `ops-engine-x`
-Trigger.dev project (`proj_dkjfnsdgwksztgjlqzlr`). The project is a
-**multi-service scheduling umbrella**: individual tasks dispatch ticks to
-whichever backend service owns the scheduled concern (serx-api today, oex-api
-or ops-engine-x itself tomorrow). Trigger.dev stays dumb — it fires on cron,
-POSTs, and logs. All business logic lives in the target service.
+Trigger.dev project (`proj_dkjfnsdgwksztgjlqzlr`). **Every task is identical
+in shape**: it fires on cron and tells ops-engine-x to dispatch a named
+event. All routing (which target service, which path, which bearer token)
+is resolved server-side by ops-engine-x through its `scheduled_events`
+registry.
+
+Trigger.dev never calls a target service directly. It never holds a target
+service's bearer token. Adding a new scheduled event never requires adding
+a new environment variable here.
 
 ## Architecture
 
 ```
-  Trigger.dev (cloud)                 Target backend                     ops-engine-x
-  ─────────────────────               ───────────────────                 ───────────────
-  <x>-scheduler-tick                  /internal/scheduler/<job>           /internal/scheduler/runs
-  every <cron>           ─POST───▶    <service-specific work>  ─ok/err─▶  insert scheduler_runs row
-                                      Bearer ${X_AUTH_TOKEN}              Bearer ${OPEX_AUTH_TOKEN}
+  Trigger.dev (cloud)                   ops-engine-x                            target service
+  ───────────────────                   ─────────────────────                   ────────────────
+  <event_id>-task                       POST /internal/scheduler/tick           POST <target_path>
+  cron fires             ─POST─────▶    {event_id, trigger_run_id}   ─POST──▶   Bearer ${svc_token}
+                                        • lookup scheduled_events                <work>
+                                        • resolve target_service                 ─outcome─▶
+                                        • POST target
+                                        • insert scheduler_runs
+                         ◀─TickResult─  ←───────summary────────────────────────
 ```
 
-- Each task POSTs `{}` to one internal endpoint on one backend service, with
-  that service's bearer token.
-- After the work POST returns (or errors), the task POSTs the outcome to
-  `${OPEX_API_URL}/internal/scheduler/runs` with `OPEX_AUTH_TOKEN`.
-  ops-engine-x appends one row to `public.scheduler_runs` per run.
-- Adding a new scheduled event type within an existing target (e.g. a new
-  variety of SERX-owned reminder) does **not** require a new Trigger.dev
-  task. It only requires appending a new `EventConfig` in that service's
-  dispatcher. The tick URL stays the same.
-- Adding a scheduled job for a *new* target service (e.g. oex-api nightly
-  sweep) = one new `*-scheduler-tick.ts` file in this dir + two new env
-  vars (`<SERVICE>_API_URL`, `<SERVICE>_AUTH_TOKEN`) in the Trigger.dev
-  dashboard. The helper below does the rest.
+Key properties:
+
+- **One source of truth for routing.** `scheduled_events` (in ops-engine-x's Supabase) maps `event_id → (target_service, target_path, enabled)`. Operators can disable or re-point a schedule with a SQL update; no Trigger.dev redeploy required.
+- **Target-service credentials never leave ops-engine-x.** `SERX_AUTH_TOKEN`, `SERX_API_BASE_URL`, and their future siblings live in ops-engine-x's Doppler. Adding a new target service = one row in `app/service_registry.py` + two secrets in Doppler.
+- **ops-engine-x owns the run log.** Every dispatch (success or failure) appends a row to `scheduler_runs` in-process. No extra HTTP call, no best-effort fallback.
+- **Trigger.dev is pure timing.** Each task = `id + cron + fireScheduledEvent(id, ctx.run.id)`. Nothing else.
 
 ## Key files
 
 | File | Role |
 |---|---|
-| [`../../trigger.config.ts`](../../trigger.config.ts) | Project config (project id, runtime, retries, task dir) |
-| [`lib/tick-and-log.ts`](./lib/tick-and-log.ts) | Reusable helper. Every task calls `tickAndLog({...})` — it handles the work POST, truncates the response body to 8KB, logs the outcome to ops-engine-x, and throws on non-2xx so Trigger.dev marks the run as errored. |
-| [`serx-scheduler-tick.ts`](./serx-scheduler-tick.ts) | The first production task. Cron `0 */6 * * *`. POSTs to `${SERX_API_URL}/api/internal/scheduler/dispatch-due-preframes`. |
+| [`../../trigger.config.ts`](../../trigger.config.ts) | Trigger.dev project config (project id, runtime, retries, task dir) |
+| [`lib/fire-scheduled-event.ts`](./lib/fire-scheduled-event.ts) | Reusable helper every task calls. POSTs to ops-engine-x's tick endpoint, throws on dispatcher or target failures so Trigger.dev marks the run errored. |
+| [`serx-dispatch-due-preframes.ts`](./serx-dispatch-due-preframes.ts) | First production task. Cron `0 */6 * * *`. Fires event `serx.dispatch_due_preframes`. |
 
 Server-side (ops-engine-x):
 
 | File | Role |
 |---|---|
-| [`../../app/main.py`](../../app/main.py) | `POST /internal/scheduler/runs` (insert) and `GET /internal/scheduler/runs` (list) |
-| [`../../app/scheduler_runs.py`](../../app/scheduler_runs.py) | `scheduler_runs` table CRUD |
+| [`../../app/scheduled_events.py`](../../app/scheduled_events.py) | CRUD on the `scheduled_events` registry |
+| [`../../app/scheduler_runs.py`](../../app/scheduler_runs.py) | CRUD on the `scheduler_runs` log |
+| [`../../app/service_registry.py`](../../app/service_registry.py) | Slug (`serx`, future `oex`) → (base URL env var, auth token env var) |
+| [`../../app/main.py`](../../app/main.py) | `POST /internal/scheduler/tick` dispatcher; `GET|PUT|DELETE /scheduled-events/*` CRUD; `GET /internal/scheduler/runs` inspection |
 
-Supabase table `public.scheduler_runs` was created via the Supabase MCP
-migration `create_scheduler_runs` (2026-04-23).
+Supabase migrations (applied via Supabase MCP):
 
-## Environment variables (Trigger.dev dashboard)
+- `create_scheduler_runs` — append-only run log.
+- `create_scheduled_events` — event registry.
 
-Set these in **Trigger.dev → Project → Environment variables**, per
-environment (dev / staging / prod). The task runtime runs on Trigger.dev's
-cloud and does not have access to your Doppler secrets — so Doppler is not
-the source of truth here.
+## Environment variables
+
+### Trigger.dev dashboard (per environment: dev / staging / prod)
+
+Only two. Target-service credentials do NOT live here anymore.
 
 | Variable | Purpose |
 |---|---|
-| `OPEX_API_URL` | Base URL of ops-engine-x, e.g. `https://api.opsengine.run`. No trailing slash required. |
-| `OPEX_AUTH_TOKEN` | Bearer token for ops-engine-x. Must match `OPEX_AUTH_TOKEN` in the `ops-engine-x/prd` Doppler config. |
-| `SERX_API_URL` | Base URL of serx-api, e.g. `https://api.serviceengine.xyz`. No trailing slash required. |
-| `SERX_AUTH_TOKEN` | Bearer token for serx-api's internal scheduler endpoint. |
+| `OPEX_API_URL` | Base URL of ops-engine-x, e.g. `https://api.opsengine.run`. |
+| `OPEX_AUTH_TOKEN` | Bearer matching `OPEX_AUTH_TOKEN` in `ops-engine-x/prd` Doppler. |
 
-Adding a new target service → add `<X>_API_URL` + `<X>_AUTH_TOKEN` to this
-list and consume them in the new task file via `process.env`.
+### ops-engine-x Doppler (`ops-engine-x/prd`)
+
+Target-service credentials live here. The dispatcher reads them through
+`app/service_registry.py`.
+
+| Variable | Purpose |
+|---|---|
+| `SERX_API_BASE_URL` | e.g. `https://api.serviceengine.xyz` |
+| `SERX_AUTH_TOKEN` | serx-api's inbound bearer |
+
+Future targets (`oex`, etc.) follow the same `<SLUG>_API_BASE_URL` /
+`<SLUG>_AUTH_TOKEN` pattern.
+
+## Registering a new scheduled event
+
+1. Pick an `event_id`, format `<service>.<verb_noun>` — e.g. `oex.sweep_stale_suppressions`.
+2. `PUT /scheduled-events/{event_id}` with `{target_service, target_path, cron?, description?, enabled}`.
+3. Create a Trigger.dev task file (~15 lines) in this directory whose `id` matches the `event_id` and whose `run:` calls `fireScheduledEvent("<event_id>", ctx.run.id)`.
+4. `npx trigger.dev@latest deploy`.
+
+If the target service is new, first add it to `app/service_registry.py` and
+add its two secrets (`<SLUG>_API_BASE_URL`, `<SLUG>_AUTH_TOKEN`) to
+ops-engine-x's Doppler. Redeploy ops-engine-x once, never again for that
+service.
 
 ## Cron cadence
 
 Each task owns its cron. Keep the cron string in a named constant at the
-top of the task file (see `CRON_EVERY_6_HOURS` in `serx-scheduler-tick.ts`)
-rather than inlining. Idempotency is owned server-side by the target
-service — overlapping ticks are safe as long as the target protects
-against duplicate dispatch (SERX uses a DB uniqueness index; other targets
-should do the same before tightening cadence).
+top of the task file (see `CRON_EVERY_6_HOURS` in
+`serx-dispatch-due-preframes.ts`). The `scheduled_events.cron` column is
+**informational only** — Trigger.dev is the actual scheduler and the task
+file is canonical. The column exists for operator inspection and drift
+audits.
 
-## Deploying
+Idempotency of overlapping ticks is owned by the target service.
 
-Trigger.dev deploys are out-of-band from Railway:
+## Deploying & local dev
 
 ```bash
 npx trigger.dev@latest deploy
+npx trigger.dev@latest dev  # local iteration
 ```
 
-Env vars are managed via the Trigger.dev dashboard or `npx trigger.dev env`.
-Local iteration:
-
-```bash
-npx trigger.dev@latest dev
-```
-
-During `dev`, `process.env` values come from your shell / Trigger.dev's dev
-environment — not from Doppler. See the Trigger.dev docs for how to seed
-local-dev env vars.
+Env vars during `dev` come from your shell / Trigger.dev's dev env — not
+from Doppler.
 
 ## Inspecting runs
 
-Query `public.scheduler_runs` via Supabase, or:
+Via HTTP:
 
 ```bash
-# recent runs, any task
+# recent runs, any event
 curl -H "Authorization: Bearer $OPEX_AUTH_TOKEN" \
   "https://api.opsengine.run/internal/scheduler/runs?limit=20"
 
-# last 10 failures of the serx tick
+# last 10 failures of the serx preframe dispatcher
 curl -H "Authorization: Bearer $OPEX_AUTH_TOKEN" \
-  "https://api.opsengine.run/internal/scheduler/runs?task_id=serx:scheduler-tick&ok=false&limit=10"
+  "https://api.opsengine.run/internal/scheduler/runs?task_id=serx.dispatch_due_preframes&ok=false&limit=10"
 ```
 
-Trigger.dev's own dashboard still shows the canonical run log (stdout,
-stack traces, retries). `scheduler_runs` is the queryable-from-SQL summary
-for ops/observability.
+Or query `public.scheduler_runs` directly in Supabase. Trigger.dev's own
+dashboard still shows the canonical run log with stdout/stack traces;
+`scheduler_runs` is the SQL-queryable summary for ops/observability.

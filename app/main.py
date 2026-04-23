@@ -17,7 +17,7 @@ Doppler does not hold that secret).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -29,9 +29,11 @@ import json
 
 from app import agent_defaults as agent_defaults_store
 from app import event_routes as event_routes_store
+from app import scheduled_events as scheduled_events_store
 from app import scheduler_runs as scheduler_runs_store
+from app import service_registry
 from app.anthropic_client import create_session, get_agent, list_agents, send_user_message
-from app.config import settings
+from app.config import MissingSecretError, settings
 from app.deps import require_admin_token, require_opex_auth
 from app.sync import sync_from_anthropic
 
@@ -102,30 +104,6 @@ class EventRouteList(BaseModel):
     count: int
 
 
-class SchedulerRunPayload(BaseModel):
-    """Incoming log row from a Trigger.dev scheduled task."""
-
-    task_id: str = Field(..., min_length=1, description="Trigger.dev task id, e.g. 'serx:scheduler-tick'.")
-    target_url: str = Field(..., min_length=1, description="The URL the tick POSTed to.")
-    started_at: datetime
-    finished_at: datetime
-    duration_ms: int = Field(..., ge=0)
-    ok: bool
-    http_status: int | None = Field(default=None, ge=100, le=599)
-    summary: Any | None = Field(
-        default=None,
-        description="Response body from the target (any JSON value). Truncated client-side if oversized.",
-    )
-    error: str | None = Field(
-        default=None,
-        description="Short human-readable reason the run was not ok. Required when ok=false and no http_status was received.",
-    )
-    trigger_run_id: str | None = Field(
-        default=None,
-        description="Trigger.dev run id, for cross-linking to the Trigger.dev dashboard.",
-    )
-
-
 class SchedulerRun(BaseModel):
     id: str
     task_id: str
@@ -144,6 +122,49 @@ class SchedulerRun(BaseModel):
 class SchedulerRunList(BaseModel):
     data: list[SchedulerRun]
     count: int
+
+
+class ScheduledEvent(BaseModel):
+    event_id: str
+    target_service: str
+    target_path: str
+    enabled: bool
+    description: str | None = None
+    cron: str | None = None
+
+
+class ScheduledEventPayload(BaseModel):
+    target_service: str = Field(..., min_length=1, description="Registered service slug, e.g. 'serx'.")
+    target_path: str = Field(..., pattern=r"^/", description="Path on the target service; must start with '/'.")
+    enabled: bool = True
+    description: str | None = None
+    cron: str | None = Field(
+        default=None,
+        description="Cron string \u2014 informational only. Trigger.dev's task file owns the live cron.",
+    )
+
+
+class ScheduledEventList(BaseModel):
+    data: list[ScheduledEvent]
+    count: int
+
+
+class TickRequest(BaseModel):
+    event_id: str = Field(..., min_length=1)
+    trigger_run_id: str | None = Field(
+        default=None,
+        description="Trigger.dev run id, stored on the scheduler_runs row for cross-linking.",
+    )
+
+
+class TickResult(BaseModel):
+    event_id: str
+    ok: bool
+    http_status: int | None = None
+    duration_ms: int
+    summary: Any | None = None
+    error: str | None = None
+    scheduler_run_id: str
 
 
 app = FastAPI(
@@ -379,31 +400,87 @@ def delete_event_route(source: str, event_name: str) -> DeleteResult:
 
 
 @app.post(
-    "/internal/scheduler/runs",
+    "/internal/scheduler/tick",
     dependencies=[Depends(require_opex_auth)],
-    response_model=SchedulerRun,
-    status_code=201,
+    response_model=TickResult,
 )
-def record_scheduler_run(body: SchedulerRunPayload) -> SchedulerRun:
-    """Append a scheduler-run log row.
+def scheduler_tick(body: TickRequest) -> TickResult:
+    """Fire a scheduled event.
 
-    Called by the ops-engine-x Trigger.dev project after every tick. The task
-    itself owns the outbound work POST (to serx-api, oex-api, etc.) and then
-    POSTs here with the outcome. ops-engine-x only records.
+    Called by the ops-engine-x Trigger.dev project when a cron task fires.
+    Looks up `body.event_id` in `scheduled_events`, resolves the target
+    service via `app.service_registry`, POSTs an empty body to
+    `{base_url}{target_path}` with the service's bearer token, appends a
+    row to `scheduler_runs`, and returns the outcome.
+
+    Always returns 200 on a successful *dispatcher* run \u2014 even if the
+    target returned non-2xx or the request errored. Callers check `ok` to
+    decide retries. Dispatcher-level failures (missing event, unknown
+    service, missing credentials) return 4xx/5xx with no log row.
     """
-    row = scheduler_runs_store.insert(
-        task_id=body.task_id,
-        target_url=body.target_url,
-        started_at=body.started_at,
-        finished_at=body.finished_at,
-        duration_ms=body.duration_ms,
-        ok=body.ok,
-        http_status=body.http_status,
-        summary=body.summary,
-        error=body.error,
+    event = scheduled_events_store.get(body.event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No scheduled_event for event_id={body.event_id}")
+    if not event["enabled"]:
+        raise HTTPException(status_code=409, detail=f"scheduled_event {body.event_id} is disabled")
+
+    try:
+        target = service_registry.resolve(event["target_service"])
+    except KeyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except MissingSecretError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    target_url = f"{target.base_url}{event['target_path']}"
+    started_at = datetime.now(tz=UTC)
+    http_status: int | None = None
+    ok = False
+    summary: Any | None = None
+    error_text: str | None = None
+
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                target_url,
+                headers={
+                    "Authorization": f"Bearer {target.auth_token}",
+                    "Content-Type": "application/json",
+                },
+                json={},
+            )
+        http_status = resp.status_code
+        ok = resp.is_success
+        summary = _parse_summary(resp.text)
+        if not ok:
+            error_text = f"HTTP {resp.status_code}"
+    except httpx.HTTPError as exc:
+        error_text = f"{type(exc).__name__}: {exc}"
+
+    finished_at = datetime.now(tz=UTC)
+    duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+
+    run = scheduler_runs_store.insert(
+        task_id=event["event_id"],
+        target_url=target_url,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        ok=ok,
+        http_status=http_status,
+        summary=summary,
+        error=error_text,
         trigger_run_id=body.trigger_run_id,
     )
-    return SchedulerRun(**row)
+
+    return TickResult(
+        event_id=event["event_id"],
+        ok=ok,
+        http_status=http_status,
+        duration_ms=duration_ms,
+        summary=summary,
+        error=error_text,
+        scheduler_run_id=run["id"],
+    )
 
 
 @app.get(
@@ -412,12 +489,91 @@ def record_scheduler_run(body: SchedulerRunPayload) -> SchedulerRun:
     response_model=SchedulerRunList,
 )
 def list_scheduler_runs(
-    task_id: str | None = Query(default=None, description="Filter to a single task id."),
+    task_id: str | None = Query(default=None, description="Filter to a single task / event id."),
     ok: bool | None = Query(default=None, description="Filter to successes (true) or failures (false)."),
     limit: int = Query(default=50, ge=1, le=500),
 ) -> SchedulerRunList:
     rows = scheduler_runs_store.list_recent(task_id=task_id, ok=ok, limit=limit)
     return SchedulerRunList(data=[SchedulerRun(**r) for r in rows], count=len(rows))
+
+
+@app.get(
+    "/scheduled-events",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=ScheduledEventList,
+)
+def list_scheduled_events() -> ScheduledEventList:
+    rows = scheduled_events_store.list_all()
+    return ScheduledEventList(data=[ScheduledEvent(**r) for r in rows], count=len(rows))
+
+
+@app.get(
+    "/scheduled-events/{event_id}",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=ScheduledEvent,
+)
+def get_scheduled_event(event_id: str) -> ScheduledEvent:
+    row = scheduled_events_store.get(event_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"No scheduled_event for event_id={event_id}")
+    return ScheduledEvent(**row)
+
+
+@app.put(
+    "/scheduled-events/{event_id}",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=ScheduledEvent,
+)
+def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> ScheduledEvent:
+    # Validate the slug is registered so operators can't set up an event
+    # that will blow up at dispatch time.
+    if payload.target_service not in service_registry.registered_slugs():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown target_service '{payload.target_service}'. "
+                f"Registered: {service_registry.registered_slugs()}."
+            ),
+        )
+    row = scheduled_events_store.upsert(
+        event_id,
+        target_service=payload.target_service,
+        target_path=payload.target_path,
+        enabled=payload.enabled,
+        description=payload.description,
+        cron=payload.cron,
+    )
+    return ScheduledEvent(**row)
+
+
+@app.delete(
+    "/scheduled-events/{event_id}",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=DeleteResult,
+)
+def delete_scheduled_event(event_id: str) -> DeleteResult:
+    deleted = scheduled_events_store.delete(event_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No scheduled_event for that event_id")
+    return DeleteResult(deleted=True)
+
+
+def _parse_summary(raw: str) -> Any | None:
+    """Parse a response body for storage in scheduler_runs.summary.
+
+    Same contract as the trigger-side helper used to honour: valid JSON is
+    stored as-is; otherwise the body is wrapped as {"raw_text": ...} and
+    truncated to 8KB. Truncation here is a belt-and-suspenders cap on top
+    of whatever the target service already returns.
+    """
+    max_bytes = 8 * 1024
+    text = raw[:max_bytes] if len(raw) > max_bytes else raw
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {"raw_text": text, "truncated": len(raw) > max_bytes}
 
 
 @app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)

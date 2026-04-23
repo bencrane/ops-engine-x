@@ -17,8 +17,11 @@ Doppler does not hold that secret).
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -26,6 +29,7 @@ import json
 
 from app import agent_defaults as agent_defaults_store
 from app import event_routes as event_routes_store
+from app import scheduler_runs as scheduler_runs_store
 from app.anthropic_client import create_session, get_agent, list_agents, send_user_message
 from app.config import settings
 from app.deps import require_admin_token, require_opex_auth
@@ -95,6 +99,50 @@ class EventRoutePayload(BaseModel):
 
 class EventRouteList(BaseModel):
     data: list[EventRoute]
+    count: int
+
+
+class SchedulerRunPayload(BaseModel):
+    """Incoming log row from a Trigger.dev scheduled task."""
+
+    task_id: str = Field(..., min_length=1, description="Trigger.dev task id, e.g. 'serx:scheduler-tick'.")
+    target_url: str = Field(..., min_length=1, description="The URL the tick POSTed to.")
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int = Field(..., ge=0)
+    ok: bool
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    summary: Any | None = Field(
+        default=None,
+        description="Response body from the target (any JSON value). Truncated client-side if oversized.",
+    )
+    error: str | None = Field(
+        default=None,
+        description="Short human-readable reason the run was not ok. Required when ok=false and no http_status was received.",
+    )
+    trigger_run_id: str | None = Field(
+        default=None,
+        description="Trigger.dev run id, for cross-linking to the Trigger.dev dashboard.",
+    )
+
+
+class SchedulerRun(BaseModel):
+    id: str
+    task_id: str
+    target_url: str
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    ok: bool
+    http_status: int | None = None
+    summary: Any | None = None
+    error: str | None = None
+    trigger_run_id: str | None = None
+    created_at: datetime
+
+
+class SchedulerRunList(BaseModel):
+    data: list[SchedulerRun]
     count: int
 
 
@@ -328,6 +376,48 @@ def delete_event_route(source: str, event_name: str) -> DeleteResult:
     if not deleted:
         raise HTTPException(status_code=404, detail="No event_route configured")
     return DeleteResult(deleted=True)
+
+
+@app.post(
+    "/internal/scheduler/runs",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=SchedulerRun,
+    status_code=201,
+)
+def record_scheduler_run(body: SchedulerRunPayload) -> SchedulerRun:
+    """Append a scheduler-run log row.
+
+    Called by the ops-engine-x Trigger.dev project after every tick. The task
+    itself owns the outbound work POST (to serx-api, oex-api, etc.) and then
+    POSTs here with the outcome. ops-engine-x only records.
+    """
+    row = scheduler_runs_store.insert(
+        task_id=body.task_id,
+        target_url=body.target_url,
+        started_at=body.started_at,
+        finished_at=body.finished_at,
+        duration_ms=body.duration_ms,
+        ok=body.ok,
+        http_status=body.http_status,
+        summary=body.summary,
+        error=body.error,
+        trigger_run_id=body.trigger_run_id,
+    )
+    return SchedulerRun(**row)
+
+
+@app.get(
+    "/internal/scheduler/runs",
+    dependencies=[Depends(require_opex_auth)],
+    response_model=SchedulerRunList,
+)
+def list_scheduler_runs(
+    task_id: str | None = Query(default=None, description="Filter to a single task id."),
+    ok: bool | None = Query(default=None, description="Filter to successes (true) or failures (false)."),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> SchedulerRunList:
+    rows = scheduler_runs_store.list_recent(task_id=task_id, ok=ok, limit=limit)
+    return SchedulerRunList(data=[SchedulerRun(**r) for r in rows], count=len(rows))
 
 
 @app.get("/agents", dependencies=[Depends(require_admin_token)], response_model=None)

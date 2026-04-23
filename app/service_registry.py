@@ -41,8 +41,11 @@ _REGISTRY: dict[str, ServiceRegistration] = {
         base_url_env="SERX_API_URL",
         auth_token_env="SERX_AUTH_TOKEN",
     ),
-    # Future slugs, add when those services come online:
-    # "oex": ServiceRegistration("oex", "OEX_API_URL", "OEX_AUTH_TOKEN"),
+    "oex": ServiceRegistration(
+        slug="oex",
+        base_url_env="OEX_API_URL",
+        auth_token_env="OEX_AUTH_TOKEN",
+    ),
     # "opex" (self-call) intentionally omitted until we actually need a
     # scheduled job that hits an ops-engine-x internal endpoint. When that
     # comes, prefer an in-process dispatch helper over HTTP loopback.

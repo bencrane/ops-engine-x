@@ -44,9 +44,11 @@ class Settings(BaseSettings):
 
     # Outbound service credentials. Each downstream service ops-engine-x
     # dispatches to needs a matching pair here and an entry in
-    # `app.service_registry`. Slugs currently registered: serx.
+    # `app.service_registry`. Slugs currently registered: serx, oex.
     serx_api_url: str | None = None
     serx_auth_token: str | None = None
+    oex_api_url: str | None = None
+    oex_auth_token: str | None = None
 
     anthropic_api_key: str | None = None
 

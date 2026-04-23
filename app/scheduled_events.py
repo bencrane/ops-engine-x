@@ -1,9 +1,10 @@
 """CRUD helpers for the scheduled_events table.
 
-Maps event_id -> (target_service, target_path, enabled, description, cron).
-Ops-engine-x's `/internal/scheduler/tick` dispatcher resolves an incoming
-event_id through here, then through `app.service_registry` to get the
-base URL + auth token, then POSTs to target_service + target_path.
+Maps event_id -> (target_service, target_path, http_method, enabled,
+description, cron). Ops-engine-x's `/internal/scheduler/tick` dispatcher
+resolves an incoming event_id through here, then through
+`app.service_registry` to get the base URL + auth token, then issues an
+HTTP call (GET or POST) against target_service + target_path.
 
 See app/main.py for the dispatcher and app/service_registry.py for the
 slug-to-credentials mapping.
@@ -11,21 +12,25 @@ slug-to-credentials mapping.
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from app.db import connect
+
+
+HttpMethod = Literal["GET", "POST"]
 
 
 class ScheduledEvent(TypedDict):
     event_id: str
     target_service: str
     target_path: str
+    http_method: HttpMethod
     enabled: bool
     description: str | None
     cron: str | None
 
 
-_COLS = "event_id, target_service, target_path, enabled, description, cron"
+_COLS = "event_id, target_service, target_path, http_method, enabled, description, cron"
 
 
 def _row_to_dict(row: tuple) -> ScheduledEvent:
@@ -33,9 +38,10 @@ def _row_to_dict(row: tuple) -> ScheduledEvent:
         "event_id": row[0],
         "target_service": row[1],
         "target_path": row[2],
-        "enabled": row[3],
-        "description": row[4],
-        "cron": row[5],
+        "http_method": row[3],
+        "enabled": row[4],
+        "description": row[5],
+        "cron": row[6],
     }
 
 
@@ -63,6 +69,7 @@ def upsert(
     *,
     target_service: str,
     target_path: str,
+    http_method: HttpMethod = "POST",
     enabled: bool = True,
     description: str | None = None,
     cron: str | None = None,
@@ -72,18 +79,19 @@ def upsert(
             cur.execute(
                 f"""
                 insert into scheduled_events
-                    (event_id, target_service, target_path, enabled, description, cron)
-                values (%s, %s, %s, %s, %s, %s)
+                    (event_id, target_service, target_path, http_method, enabled, description, cron)
+                values (%s, %s, %s, %s, %s, %s, %s)
                 on conflict (event_id) do update set
                     target_service = excluded.target_service,
                     target_path = excluded.target_path,
+                    http_method = excluded.http_method,
                     enabled = excluded.enabled,
                     description = excluded.description,
                     cron = excluded.cron,
                     updated_at = now()
                 returning {_COLS}
                 """,
-                (event_id, target_service, target_path, enabled, description, cron),
+                (event_id, target_service, target_path, http_method, enabled, description, cron),
             )
             row = cur.fetchone()
         conn.commit()

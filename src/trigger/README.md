@@ -27,7 +27,7 @@ a new environment variable here.
 
 Key properties:
 
-- **One source of truth for routing.** `scheduled_events` (in ops-engine-x's Supabase) maps `event_id → (target_service, target_path, enabled)`. Operators can disable or re-point a schedule with a SQL update; no Trigger.dev redeploy required.
+- **One source of truth for routing.** `scheduled_events` (in ops-engine-x's Supabase) maps `event_id → (target_service, target_path, http_method, enabled)`. Operators can disable, re-point, or switch a schedule between GET/POST with a SQL update; no Trigger.dev redeploy required. `http_method` defaults to `POST` (the right default for side-effectful scheduled work); use `GET` for polling / reachability-probe style events.
 - **Target-service credentials never leave ops-engine-x.** `SERX_AUTH_TOKEN`, `SERX_API_URL`, and their future siblings live in ops-engine-x's Doppler. Adding a new target service = one row in `app/service_registry.py` + two secrets in Doppler.
 - **ops-engine-x owns the run log.** Every dispatch (success or failure) appends a row to `scheduler_runs` in-process. No extra HTTP call, no best-effort fallback.
 - **Trigger.dev is pure timing.** Each task = `id + cron + fireScheduledEvent(id, ctx.run.id)`. Nothing else.

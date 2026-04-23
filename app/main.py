@@ -18,7 +18,7 @@ Doppler does not hold that secret).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -128,6 +128,7 @@ class ScheduledEvent(BaseModel):
     event_id: str
     target_service: str
     target_path: str
+    http_method: Literal["GET", "POST"] = "POST"
     enabled: bool
     description: str | None = None
     cron: str | None = None
@@ -136,6 +137,14 @@ class ScheduledEvent(BaseModel):
 class ScheduledEventPayload(BaseModel):
     target_service: str = Field(..., min_length=1, description="Registered service slug, e.g. 'serx'.")
     target_path: str = Field(..., pattern=r"^/", description="Path on the target service; must start with '/'.")
+    http_method: Literal["GET", "POST"] = Field(
+        default="POST",
+        description=(
+            "HTTP method the dispatcher uses to call the target. Defaults to POST "
+            "(side-effectful scheduled work). Use GET for read-only polling, "
+            "reachability probes, or targets that expose their trigger as GET."
+        ),
+    )
     enabled: bool = True
     description: str | None = None
     cron: str | None = Field(
@@ -197,8 +206,17 @@ def admin_status() -> dict[str, object]:
     has successfully injected. Values are never returned, only presence booleans.
 
     Useful immediately after a deploy or DOPPLER_TOKEN rotation to verify the
-    process actually loaded what you expect.
+    process actually loaded what you expect. The outbound-services block is
+    derived from `app.service_registry` so adding a new slug automatically
+    surfaces its two creds here.
     """
+    outbound_services: dict[str, dict[str, bool]] = {}
+    for slug in service_registry.registered_slugs():
+        reg = service_registry._REGISTRY[slug]  # noqa: SLF001
+        outbound_services[slug] = {
+            reg.base_url_env.lower(): bool(getattr(settings, reg.base_url_env.lower(), None)),
+            reg.auth_token_env.lower(): bool(getattr(settings, reg.auth_token_env.lower(), None)),
+        }
     return {
         "service": "ops-engine-x",
         "status": "ok",
@@ -206,6 +224,7 @@ def admin_status() -> dict[str, object]:
             "opex_auth_token": bool(settings.opex_auth_token),
             "supabase_db_url": bool(settings.supabase_db_url),
         },
+        "outbound_services": outbound_services,
     }
 
 
@@ -409,9 +428,15 @@ def scheduler_tick(body: TickRequest) -> TickResult:
 
     Called by the ops-engine-x Trigger.dev project when a cron task fires.
     Looks up `body.event_id` in `scheduled_events`, resolves the target
-    service via `app.service_registry`, POSTs an empty body to
+    service via `app.service_registry`, issues the configured HTTP call
+    (GET or POST, per the row's `http_method`) to
     `{base_url}{target_path}` with the service's bearer token, appends a
     row to `scheduler_runs`, and returns the outcome.
+
+    Method defaults to POST for existing rows and for the vast majority of
+    scheduled work (side-effectful). GET is supported for polling /
+    reachability-probe style events and for targets whose trigger endpoint
+    happens to be GET.
 
     Always returns 200 on a successful *dispatcher* run \u2014 even if the
     target returned non-2xx or the request errored. Callers check `ok` to
@@ -432,22 +457,23 @@ def scheduler_tick(body: TickRequest) -> TickResult:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     target_url = f"{target.base_url}{event['target_path']}"
+    method = event["http_method"]
     started_at = datetime.now(tz=UTC)
     http_status: int | None = None
     ok = False
     summary: Any | None = None
     error_text: str | None = None
 
+    headers = {"Authorization": f"Bearer {target.auth_token}"}
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
+
     try:
         with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                target_url,
-                headers={
-                    "Authorization": f"Bearer {target.auth_token}",
-                    "Content-Type": "application/json",
-                },
-                json={},
-            )
+            if method == "GET":
+                resp = client.get(target_url, headers=headers)
+            else:
+                resp = client.post(target_url, headers=headers, json={})
         http_status = resp.status_code
         ok = resp.is_success
         summary = _parse_summary(resp.text)
@@ -539,6 +565,7 @@ def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> Schedu
         event_id,
         target_service=payload.target_service,
         target_path=payload.target_path,
+        http_method=payload.http_method,
         enabled=payload.enabled,
         description=payload.description,
         cron=payload.cron,

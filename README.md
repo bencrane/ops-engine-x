@@ -39,6 +39,10 @@ Secrets this project **does** expect:
 | ---- | -------- | ----- |
 | `OPEX_AUTH_TOKEN` | required | Inbound bearer token domain services present when calling this service. Gates every non-public route. |
 | `SUPABASE_DB_URL` | required | Postgres connection string backing `event_routes` (and the preserved-for-extraction `agent_defaults`). |
+| `SERX_API_URL` | outbound | Base URL for serx-api. Required whenever a `scheduled_events` row has `target_service='serx'`. |
+| `SERX_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling serx-api. Paired with `SERX_API_URL`. |
+| `OEX_API_URL` | outbound | Base URL for oex-api (e.g. `https://api.outboundengine.dev`). Required whenever a `scheduled_events` row has `target_service='oex'`. |
+| `OEX_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling oex-api. Paired with `OEX_API_URL`. |
 | `SUPABASE_URL` | optional | Reserved for future use. |
 | `SUPABASE_SERVICE_ROLE_KEY` | optional | Reserved. |
 | `SUPABASE_ANON_KEY` | optional | Reserved. |

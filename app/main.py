@@ -45,7 +45,7 @@ class AgentDefaultsPayload(BaseModel):
         default=None,
         description=(
             "Optional per-agent kickoff preamble prepended to the user.message "
-            "sent when /sessions/from-event fires. Use this to give the agent "
+            "sent when /events/receive fires. Use this to give the agent "
             "a short, durable job description that sits above the event payload."
         ),
     )
@@ -72,14 +72,14 @@ class EventRef(BaseModel):
     id: str = Field(..., min_length=1, description="UUID of the row holding the raw payload")
 
 
-class FromEventPayload(BaseModel):
-    source: str = Field(..., min_length=1, description="e.g. 'emailbison', 'cal.com'")
+class ReceiveEventPayload(BaseModel):
+    source: str = Field(..., min_length=1, description="e.g. 'emailbison', 'cal_com'")
     event_name: str = Field(..., min_length=1, description="e.g. 'lead_replied', 'BOOKING_CREATED'")
     event_ref: EventRef = Field(..., description="Pointer to the stored raw payload in the caller's DB")
     title: str | None = Field(default=None, description="Optional session title override")
 
 
-class FromEventResult(BaseModel):
+class ReceiveEventResult(BaseModel):
     session_id: str
     agent_id: str
     environment_id: str
@@ -309,15 +309,20 @@ def _format_event_message(
 
 
 @app.post(
-    "/sessions/from-event",
+    "/events/receive",
     dependencies=[Depends(require_opex_auth)],
-    response_model=FromEventResult,
+    response_model=ReceiveEventResult,
 )
-def create_session_from_event(body: FromEventPayload) -> FromEventResult:
-    """Route (source, event_name) to an agent and fire a session.
+def receive_event(body: ReceiveEventPayload) -> ReceiveEventResult:
+    """Receive an inbound event from a webhook-ingest caller and dispatch.
 
-    Webhook-ingest callers send a reference to their stored raw payload; the
-    agent's system prompt tells it how to hydrate via the appropriate MCP tool.
+    The caller sends `(source, event_name, event_ref)` \u2014 a pointer to the
+    raw webhook payload stored in its own DB. ops-engine-x looks up the
+    matching row in `event_routes`, resolves the target agent, and today
+    fires the managed-agent session inline via the preserved-for-extraction
+    Anthropic client. Post-extraction this handler shrinks to an HTTP call
+    against managed-agents-x's invocation gateway; the endpoint's public
+    contract does not change across that cutover.
     """
     route = event_routes_store.resolve(body.source, body.event_name)
     if route is None:
@@ -377,7 +382,7 @@ def create_session_from_event(body: FromEventPayload) -> FromEventResult:
             status_code=502, detail=f"send_user_message failed: {exc}"
         ) from exc
 
-    return FromEventResult(
+    return ReceiveEventResult(
         session_id=session["id"],
         agent_id=agent_id,
         environment_id=defaults["environment_id"],

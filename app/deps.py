@@ -15,7 +15,7 @@ def require_opex_auth(authorization: str | None = Header(default=None)) -> None:
     This is the inbound auth check for every non-public route in ops-engine-x.
     `OPEX_AUTH_TOKEN` grants access *into* this service; domain services
     (serx-webhook-ingest, oex-webhook-ingest, etc.) present it when calling
-    `POST /sessions/from-event` and friends.
+    `POST /events/receive` and friends.
     """
     expected = settings.opex_auth_token
     if not expected:

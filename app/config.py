@@ -12,7 +12,7 @@ at the call site that actually needs them (see `require()`).
 Notes on a few specific fields:
 - `opex_auth_token` is the inbound bearer token domain services use to
   authenticate into this service. It's the one secret the routing surface
-  (`/sessions/from-event`, `/event-routes/*`, `/admin/status`) treats as
+  (`/events/receive`, `/event-routes/*`, `/admin/status`) treats as
   required.
 - `anthropic_api_key` is **not** a secret this project is expected to hold.
   It is present on `Settings` only because the preserved-for-extraction

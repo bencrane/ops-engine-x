@@ -6,7 +6,7 @@ Deployed to Railway as `api.opsengine.run`. Secrets come from Doppler (project `
 
 ## What this service is
 
-- **Event routing** — `POST /sessions/from-event` takes `(source, event_name, event_ref)` from a webhook-ingest app, looks up the route in the `event_routes` table, and dispatches.
+- **Event routing** — `POST /events/receive` takes `(source, event_name, event_ref)` from a webhook-ingest app, looks up the route in the `event_routes` table, and dispatches.
 - **Routing-table admin** — CRUD on `event_routes` for whoever manages the mapping (`GET|PUT|DELETE /event-routes/*`).
 - **Health + diagnostics** — `GET /health` (public liveness), `GET /admin/status` (authenticated secret-load probe).
 

@@ -108,7 +108,7 @@ At runtime, these endpoints will return clear errors (missing `ANTHROPIC_API_KEY
 9. **New `managed-agents-x` repo exists, deployed to Railway.** Its own Doppler project holds `ANTHROPIC_API_KEY`, Supabase creds, and the inbound auth token. `api.managedagents.run` DNS now points at that service (not ops-engine-x anymore).
 10. **Extract Anthropic-calling code** from ops-engine-x → managed-agents-x. The files listed under "Preserved for extraction" above are being ported over as-is. Until extraction lands, the `/agents*` and `/admin/sync/anthropic` handlers here continue to fail at call time (no `ANTHROPIC_API_KEY` in this Doppler) — intentional.
 11. **Introduce the invocation gateway** in managed-agents-x (e.g. `POST /internal/agents/{agent_id}/invoke`) that wraps `create_session` + `send_user_message`. Service-to-service auth: ops-engine-x holds an outbound token (name TBD, e.g. `MAX_AUTH_TOKEN`) in its Doppler, managed-agents-x holds the matching inbound token in its own Doppler.
-12. **Rewire `POST /sessions/from-event`** in this repo: replace the inline `app.anthropic_client.create_session` + `send_user_message` calls with an HTTP call to managed-agents-x's invocation endpoint. Once that lands, the "Preserved for extraction" files here can be deleted.
+12. **Rewire `POST /events/receive`** in this repo: replace the inline `app.anthropic_client.create_session` + `send_user_message` calls with an HTTP call to managed-agents-x's invocation endpoint. Once that lands, the "Preserved for extraction" files here can be deleted.
 13. **Build out product features** (versioning, drafts, templates, A/B tests, tool configurators, analytics) in managed-agents-x.
 
 ### Phase 4 — Layer in trigger.dev (PARALLEL TO PHASE 3)

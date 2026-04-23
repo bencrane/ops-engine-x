@@ -4,7 +4,7 @@
 **Owner service:** `ops-engine-x` (this repo), deployed at `api.opsengine.run`
 **Upstream callers:** `oex-webhook-ingest`, `serx-webhook-ingest`
 **Downstream (today):** Anthropic Managed Agents API (`/v1/sessions`), via the preserved-for-extraction code in `app/anthropic_client.py`.
-**Downstream (future):** `managed-agents-x-api` (invocation gateway). When that service comes online, the Anthropic-calling code moves there and ops-engine-x calls the gateway instead. The contract for `POST /sessions/from-event` described here does not change.
+**Downstream (future):** `managed-agents-x` (invocation gateway). When that service comes online, the Anthropic-calling code moves there and ops-engine-x calls the gateway instead. The contract for `POST /events/receive` described here does not change.
 
 This document is the canonical reference for how third-party webhooks (Cal.com, EmailBison, etc.) get turned into running Claude Managed Agent sessions. Read this before modifying any of the moving parts.
 
@@ -30,7 +30,7 @@ Cal.com / EmailBison
 │ {serx,oex}-webhook-ingest │  persists raw payload to its own DB
 └────────────┬──────────────┘  (webhook_events_raw / oex_webhook_events)
              │
-             │  POST /sessions/from-event
+             │  POST /events/receive
              │  { source, event_name, event_ref: {store, id} }
              │  Bearer OPEX_AUTH_TOKEN
              ▼
@@ -55,11 +55,11 @@ Cal.com / EmailBison
 
 ---
 
-## 3. The contract: `POST /sessions/from-event`
+## 3. The contract: `POST /events/receive`
 
-**Route:** `POST /sessions/from-event`
+**Route:** `POST /events/receive`
 **Auth:** `Authorization: Bearer ${OPEX_AUTH_TOKEN}`
-**Handler:** [app/main.py](app/main.py) (`create_session_from_event`)
+**Handler:** [app/main.py](app/main.py) (`receive_event`)
 
 ### Request body
 
@@ -177,7 +177,7 @@ create index event_routes_agent_id_idx on event_routes (agent_id);
 
 ## 5. The `agent_defaults` table
 
-**Purpose:** per-agent `environment_id`, `vault_ids`, and optional `task_instruction` that the session-creation step needs. Without defaults, `/sessions/from-event` returns 409.
+**Purpose:** per-agent `environment_id`, `vault_ids`, and optional `task_instruction` that the session-creation step needs. Without defaults, `/events/receive` returns 409.
 
 **Columns:** `agent_id` (PK), `environment_id`, `vault_ids text[]`, `task_instruction text` (nullable).
 
@@ -249,7 +249,7 @@ Cancellation reuses the original uid. Agent looks up existing meeting via `serx_
 ### Common responsibilities
 1. Receive raw webhook from provider.
 2. Write full payload to the app's own `*_webhook_events_raw` table. Store `source`, `event_name`, `payload`, and track dispatch state (e.g. `dispatch_status`, `dispatch_error`).
-3. POST to `ops-engine-x /sessions/from-event` (`https://api.opsengine.run/sessions/from-event`):
+3. POST to `ops-engine-x /events/receive` (`https://api.opsengine.run/events/receive`):
    ```
    Authorization: Bearer ${OPEX_AUTH_TOKEN}
    Content-Type: application/json
@@ -301,7 +301,7 @@ Every orchestrator system prompt tells the agent to:
 ## 9. Why this shape (design history)
 
 Earlier iterations tried:
-- **Sending the full payload to `/sessions/from-event`.** Rejected — ingest apps already persist it; shipping it a second time wastes bandwidth and couples the router to payload schemas.
+- **Sending the full payload to `/events/receive`.** Rejected — ingest apps already persist it; shipping it a second time wastes bandwidth and couples the router to payload schemas.
 - **Having the ingest app pass `agent_id`.** Rejected — that pushes routing knowledge into every caller. Centralizing it in `event_routes` means we can re-point an event to a different agent without redeploying ingest services.
 - **Source named `cal.com` or `cal`.** Rejected — `.` is brittle in some contexts (URL paths, query params); `cal` is ambiguous (Cal.com vs Google Calendar vs Apple Calendar). `cal_com` is explicit and path-safe.
 - **Pre-resolving `org_id` in the ingest app.** Rejected — each agent already has the MCP access needed to resolve org from event_type. Keeping it in the agent means one fewer cross-service contract.
@@ -312,7 +312,7 @@ Earlier iterations tried:
 
 | File | Purpose |
 |---|---|
-| [app/main.py](app/main.py) | FastAPI routes — `/sessions/from-event`, `/event-routes/*`, `/agents/*/defaults` |
+| [app/main.py](app/main.py) | FastAPI routes — `/events/receive`, `/event-routes/*`, `/agents/*/defaults` |
 | [app/event_routes.py](app/event_routes.py) | `event_routes` CRUD module |
 | [app/agent_defaults.py](app/agent_defaults.py) | `agent_defaults` CRUD module |
 | [app/anthropic_client.py](app/anthropic_client.py) | `create_session`, `send_user_message`, `get_agent`, `list_agents` |

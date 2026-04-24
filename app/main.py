@@ -198,7 +198,7 @@ def admin_status() -> dict[str, object]:
         "status": "ok",
         "secrets_loaded": {
             "opex_auth_token": bool(settings.opex_auth_token),
-            "supabase_db_url": bool(settings.supabase_db_url),
+            "opex_db_url_pooled": bool(settings.opex_db_url_pooled),
         },
         "outbound_services": outbound_services,
     }
@@ -223,7 +223,7 @@ def receive_event(body: ReceiveEventPayload) -> JSONResponse:
     - 404: no `event_route` for `(source, event_name)`.
     - 409: `event_route` exists but is disabled.
     - 500: `service_registry` has no `mag` slug (config bug).
-    - 503: `MAG_API_URL` or `MAG_AUTH_TOKEN` not set in this project's Doppler.
+    - 503: `MAGS_API_BASE_URL` or `MAGS_AUTH_TOKEN` not set in this project's Doppler.
     - 502: managed-agents-x unreachable (DNS, TCP, TLS, timeout).
     - Passthrough: any 2xx/4xx/5xx managed-agents-x returns, body verbatim.
     """

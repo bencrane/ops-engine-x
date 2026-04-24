@@ -14,7 +14,7 @@ Notes on a few specific fields:
   authenticate into this service. It's the one secret the routing surface
   (`/events/receive`, `/event-routes/*`, `/admin/status`) treats as
   required.
-- `mag_api_url` + `mag_auth_token` are the outbound credentials this
+- `mags_api_base_url` + `mags_auth_token` are the outbound credentials this
   service uses to call managed-agents-x's invocation gateway from
   `/events/receive`. Both are required at call time; registered in
   `app.service_registry` under slug `mag`.
@@ -35,20 +35,22 @@ class Settings(BaseSettings):
     )
 
     opex_auth_token: str | None = None
-    supabase_url: str | None = None
-    supabase_service_role_key: str | None = None
-    supabase_anon_key: str | None = None
-    supabase_db_url: str | None = None
-    supabase_project_ref: str | None = None
+    opex_supabase_url: str | None = None
+    opex_supabase_service_role_key: str | None = None
+    opex_supabase_anon_key: str | None = None
+    opex_supabase_publishable_key: str | None = None
+    opex_supabase_project_ref: str | None = None
+    opex_db_url_direct: str | None = None
+    opex_db_url_pooled: str | None = None
 
     # Outbound service credentials. Each downstream service ops-engine-x
     # dispatches to needs a matching pair here and an entry in
     # `app.service_registry`. Slugs currently registered: mag, serx, oex.
-    mag_api_url: str | None = None
-    mag_auth_token: str | None = None
-    serx_api_url: str | None = None
+    mags_api_base_url: str | None = None
+    mags_auth_token: str | None = None
+    serx_api_base_url: str | None = None
     serx_auth_token: str | None = None
-    oex_api_url: str | None = None
+    oex_api_base_url: str | None = None
     oex_auth_token: str | None = None
 
 

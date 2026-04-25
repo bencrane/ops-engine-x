@@ -44,7 +44,7 @@ _REGISTRY: dict[str, ServiceRegistration] = {
     "serx": ServiceRegistration(
         slug="serx",
         base_url_env="SERX_API_BASE_URL",
-        auth_token_env="SERX_AUTH_TOKEN",
+        auth_token_env="SERX_INTERNAL_BEARER_TOKEN",
     ),
     "oex": ServiceRegistration(
         slug="oex",

@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     mags_api_base_url: str | None = None
     mags_auth_token: str | None = None
     serx_api_base_url: str | None = None
-    serx_auth_token: str | None = None
+    serx_internal_bearer_token: str
     oex_api_base_url: str | None = None
     oex_auth_token: str | None = None
 

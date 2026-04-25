@@ -12,10 +12,18 @@ ops-engine-x never creates Anthropic sessions and never holds
 (agent_defaults, system prompts, vaults, versions) live entirely in
 managed-agents-x. This service's job is routing plumbing.
 
-The app must start successfully with zero secrets configured. Any feature
-that requires a secret reads it lazily (see `app.config.require()` or a
-FastAPI `Depends()` factory). Inbound auth is `OPEX_AUTH_TOKEN` (bearer),
-checked via `app.deps.require_opex_auth`.
+Inbound auth has two flavours:
+
+- Service-to-service callers (SERX/OEX webhook ingest, Trigger.dev tasks)
+  present `OPEX_INTERNAL_BEARER_TOKEN` and hit `require_internal_bearer`.
+- Operator-facing routes (admin status, event-route CRUD, scheduled-event
+  CRUD, scheduler-runs query) require an EdDSA JWT verified against
+  auth-engine-x's JWKS via `get_current_auth`.
+
+Inbound-auth env vars (`OPEX_INTERNAL_BEARER_TOKEN`, `AUX_JWKS_URL`,
+`AUX_ISSUER`, `AUX_AUDIENCE`) are required at startup; the process fails
+to boot if any are missing. Outbound credentials remain lazily validated
+at the call site that needs them.
 """
 
 from __future__ import annotations
@@ -35,7 +43,7 @@ from app import scheduled_events as scheduled_events_store
 from app import scheduler_runs as scheduler_runs_store
 from app import service_registry
 from app.config import MissingSecretError, settings
-from app.deps import require_opex_auth
+from app.deps import get_current_auth, require_internal_bearer
 
 
 class DeleteResult(BaseModel):
@@ -158,8 +166,9 @@ app = FastAPI(
         "Operational-heartbeat service. Receives events from domain-service "
         "webhook ingests and routes them to downstream targets (managed agents "
         "via managed-agents-x today; future non-agent targets plug in via the "
-        "same event_routes registry). All non-public routes require a bearer "
-        "OPEX_AUTH_TOKEN."
+        "same event_routes registry). Internal routes require "
+        "OPEX_INTERNAL_BEARER_TOKEN; operator-facing routes require an "
+        "auth-engine-x JWT."
     ),
 )
 
@@ -176,7 +185,7 @@ def root() -> dict[str, str]:
     return {"service": "ops-engine-x", "status": "ok"}
 
 
-@app.get("/admin/status", dependencies=[Depends(require_opex_auth)])
+@app.get("/admin/status", dependencies=[Depends(get_current_auth)])
 def admin_status() -> dict[str, object]:
     """Authenticated diagnostic probe: reports which configured secrets Doppler
     has successfully injected. Values are never returned, only presence booleans.
@@ -197,7 +206,10 @@ def admin_status() -> dict[str, object]:
         "service": "ops-engine-x",
         "status": "ok",
         "secrets_loaded": {
-            "opex_auth_token": bool(settings.opex_auth_token),
+            "opex_internal_bearer_token": bool(settings.opex_internal_bearer_token),
+            "aux_jwks_url": bool(settings.aux_jwks_url),
+            "aux_issuer": bool(settings.aux_issuer),
+            "aux_audience": bool(settings.aux_audience),
             "opex_db_url_pooled": bool(settings.opex_db_url_pooled),
         },
         "outbound_services": outbound_services,
@@ -206,7 +218,7 @@ def admin_status() -> dict[str, object]:
 
 @app.post(
     "/events/receive",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(require_internal_bearer)],
     response_model=None,
 )
 def receive_event(body: ReceiveEventPayload) -> JSONResponse:
@@ -281,7 +293,7 @@ def receive_event(body: ReceiveEventPayload) -> JSONResponse:
 
 @app.get(
     "/event-routes",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=EventRouteList,
 )
 def list_event_routes() -> EventRouteList:
@@ -291,7 +303,7 @@ def list_event_routes() -> EventRouteList:
 
 @app.put(
     "/event-routes/{source}/{event_name}",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=EventRoute,
 )
 def put_event_route(source: str, event_name: str, payload: EventRoutePayload) -> EventRoute:
@@ -301,7 +313,7 @@ def put_event_route(source: str, event_name: str, payload: EventRoutePayload) ->
 
 @app.delete(
     "/event-routes/{source}/{event_name}",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=DeleteResult,
 )
 def delete_event_route(source: str, event_name: str) -> DeleteResult:
@@ -313,7 +325,7 @@ def delete_event_route(source: str, event_name: str) -> DeleteResult:
 
 @app.post(
     "/internal/scheduler/tick",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(require_internal_bearer)],
     response_model=TickResult,
 )
 def scheduler_tick(body: TickRequest) -> TickResult:
@@ -404,7 +416,7 @@ def scheduler_tick(body: TickRequest) -> TickResult:
 
 @app.get(
     "/internal/scheduler/runs",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=SchedulerRunList,
 )
 def list_scheduler_runs(
@@ -418,7 +430,7 @@ def list_scheduler_runs(
 
 @app.get(
     "/scheduled-events",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=ScheduledEventList,
 )
 def list_scheduled_events() -> ScheduledEventList:
@@ -428,7 +440,7 @@ def list_scheduled_events() -> ScheduledEventList:
 
 @app.get(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=ScheduledEvent,
 )
 def get_scheduled_event(event_id: str) -> ScheduledEvent:
@@ -440,7 +452,7 @@ def get_scheduled_event(event_id: str) -> ScheduledEvent:
 
 @app.put(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=ScheduledEvent,
 )
 def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> ScheduledEvent:
@@ -468,7 +480,7 @@ def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> Schedu
 
 @app.delete(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(require_opex_auth)],
+    dependencies=[Depends(get_current_auth)],
     response_model=DeleteResult,
 )
 def delete_scheduled_event(event_id: str) -> DeleteResult:

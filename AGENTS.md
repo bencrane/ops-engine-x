@@ -23,30 +23,64 @@ If a feature touches agent authoring, versioning, editing, drafts, templates, A/
 
 ## Auth rule
 
-Inbound requests authenticate with `OPEX_AUTH_TOKEN` (bearer). Every non-public HTTP route must depend on `app.deps.require_opex_auth`:
+All inbound auth is verified against `auth-engine-x`'s JWKS via the shared
+[`aux_m2m_server`](https://github.com/bencrane/aux-m2m-client-py) library.
+Two flavours, two FastAPI deps — pick the right one for the caller:
+
+- **Service-to-service callers** (SERX/OEX webhook ingest, Trigger.dev tasks)
+  present a short-lived M2M JWT and use `require_m2m`.
+- **Operator-facing routes** (admin status, event-route CRUD, scheduled-event
+  CRUD, scheduler-runs query) require an EdDSA session JWT verified via
+  `require_session`.
 
 ```python
 from fastapi import Depends
-from app.deps import require_opex_auth
+from aux_m2m_server import require_m2m, require_session
 
-@app.post("/whatever", dependencies=[Depends(require_opex_auth)])
-def whatever(...): ...
+@app.post("/internal/whatever", dependencies=[Depends(require_m2m)])
+def internal_whatever(...): ...
+
+@app.get("/admin/whatever", dependencies=[Depends(require_session)])
+def admin_whatever(...): ...
 ```
 
-Public routes are limited to `GET /health` and `GET /` (minimal identity). Everything else is gated.
+Public routes are limited to `GET /health` and `GET /` (minimal identity).
+Everything else is gated. **Never** add a static-bearer dep — there is no
+`OPEX_INTERNAL_BEARER_TOKEN` / `OPEX_AUTH_TOKEN` anymore.
 
-Outbound tokens (ops-engine-x → some other service) are named after the callee: `MAG_AUTH_TOKEN` (managed-agents-x), `SERX_AUTH_TOKEN`, `OEX_AUTH_TOKEN`, etc. Every registered outbound service lives in [`app/service_registry.py`](app/service_registry.py) with its `(url_env, token_env)` pair.
+Outbound auth is uniform: every call to another AUX backend mints a fresh
+M2M JWT via `aux_m2m_client.M2MAuth` using `AUX_M2M_API_KEY`. There are no
+per-callee bearers (no `MAGS_AUTH_TOKEN`, no `SERX_AUTH_TOKEN`). Each
+registered outbound service lives in [`app/service_registry.py`](app/service_registry.py)
+as `(slug, base_url_env)` only.
 
-## Rule 1: Startup must be secret-tolerant
+## Rule 1: Two-tier secret contract — boot-required vs lazy
 
-The app **must boot successfully with zero secrets set**. `/health` must return 200 even if Doppler is unreachable, `DOPPLER_TOKEN` is missing, or a specific secret is absent from the Doppler config.
+There are exactly **two tiers** of secrets in this project:
+
+**Tier 1 — boot-required (`BaseAuthSettings`).** The five AUX_* env vars
+(`AUX_JWKS_URL`, `AUX_ISSUER`, `AUX_AUDIENCE`, `AUX_API_BASE_URL`,
+`AUX_M2M_API_KEY`) are required at process start. Pydantic raises
+`ValidationError` if any is missing — that's intentional. The process
+**should** fail to boot with a clear traceback rather than 503-ing every
+authenticated request.
+
+**Tier 2 — lazy/optional.** Everything else — DB DSNs, outbound base URLs,
+reserved Supabase keys — is `str | None` on `Settings` and validated at
+the call site that needs it (via `require()` or a `Depends()` factory).
+`/health` must stay green even when these are unset.
 
 Practical consequences:
 
-- Do **not** read secrets at import time or at module load.
-- Do **not** construct API clients (HTTP, database, etc.) as module-level globals that require secrets to initialize.
-- Do **not** add `assert settings.foo` or raise in `app/config.py` when a value is missing.
-- All new `Settings` fields must have a default (`None` for secrets, a safe default for non-secrets) so `Settings()` never raises.
+- Tier-1 fields (the AUX_* set) live on `BaseAuthSettings` upstream — do
+  not redeclare them in this repo's `Settings`. Inherit; don't shadow.
+- Tier-2 fields must have a default (`None` for secrets, a safe default
+  for non-secrets) so `Settings()` does not raise on their absence.
+- Do **not** read tier-2 secrets at import time or at module load.
+- Do **not** construct API clients that require tier-2 secrets as
+  module-level globals.
+- Tier-1 clients (`M2MTokenClient`, `M2MAuth`) **may** be module-level
+  globals — they're guaranteed by tier-1 boot validation.
 
 ## Rule 2: Use lazy, validated reads for every required secret
 
@@ -54,7 +88,7 @@ Practical consequences:
 
 ### Pattern A — FastAPI routes: `Depends()` factory (preferred for HTTP handlers)
 
-For anything reached via an HTTP route, use a FastAPI dependency. This gives you a proper `503 Service Unavailable` with a clear message, and it's trivially overridable in tests. See `app/deps.py` for the canonical example (`require_opex_auth`). Pattern for a new secret-backed client:
+For anything reached via an HTTP route, use a FastAPI dependency. This gives you a proper `503 Service Unavailable` with a clear message, and it's trivially overridable in tests. Pattern for a new secret-backed client:
 
 ```python
 # app/deps.py
@@ -144,7 +178,7 @@ Before opening a PR that touches config or a new integration:
 
 2. Hit `/` — it returns minimal identity info and must be 200.
 
-3. With Doppler secrets injected locally, hit `GET /admin/status` with your `OPEX_AUTH_TOKEN`. It returns a `secrets_loaded` map showing which configured secrets are present.
+3. With Doppler secrets injected locally, hit `GET /admin/status` with an operator session JWT (issued by `auth-engine-x`). It returns a `secrets_loaded` map showing which configured secrets are present.
 
 4. If your change adds a route that calls a secret-backed service, verify that hitting it without the secret returns a clear `MissingSecretError` (500 with a readable message), not a `NoneType` traceback or a 401 from the upstream.
 
@@ -156,3 +190,7 @@ Before opening a PR that touches config or a new integration:
 - Not depend on any external service (no DB ping, no upstream call, no Doppler check).
 
 Diagnostics that depend on secrets belong on `GET /admin/status` (authenticated). Readiness checks that depend on the DB belong on a new `/ready` if/when we need one.
+
+---
+
+_Last updated: 2026-04-25 (M2M cutover — replaced static bearers with EdDSA M2M JWTs minted by `auth-engine-x`; added two-tier secret contract)._

@@ -12,38 +12,41 @@ ops-engine-x never creates Anthropic sessions and never holds
 (agent_defaults, system prompts, vaults, versions) live entirely in
 managed-agents-x. This service's job is routing plumbing.
 
-Inbound auth has two flavours:
+Inbound auth has two flavours, both verified against auth-engine-x's
+JWKS by `aux_m2m_server`:
 
 - Service-to-service callers (SERX/OEX webhook ingest, Trigger.dev tasks)
-  present `OPEX_INTERNAL_BEARER_TOKEN` and hit `require_internal_bearer`.
+  present a short-lived M2M JWT and hit `require_m2m`.
 - Operator-facing routes (admin status, event-route CRUD, scheduled-event
-  CRUD, scheduler-runs query) require an EdDSA JWT verified against
-  auth-engine-x's JWKS via `get_current_auth`.
+  CRUD, scheduler-runs query) require an EdDSA session JWT verified by
+  `require_session`.
 
-Inbound-auth env vars (`OPEX_INTERNAL_BEARER_TOKEN`, `AUX_JWKS_URL`,
-`AUX_ISSUER`, `AUX_AUDIENCE`) are required at startup; the process fails
-to boot if any are missing. Outbound credentials remain lazily validated
-at the call site that needs them.
+Inbound-auth env vars (`AUX_JWKS_URL`, `AUX_ISSUER`, `AUX_AUDIENCE`,
+`AUX_API_BASE_URL`, `AUX_M2M_API_KEY`) are required at startup; the
+process fails to boot if any are missing. Outbound credentials are uniform
+— every call out uses a fresh M2M JWT from `aux_m2m_client.M2MAuth`, no
+per-service bearers. Outbound base URLs are validated lazily at the call
+site that needs them.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
+from aux_m2m_client import M2MAuth, M2MTokenClient
+from aux_m2m_server import require_m2m, require_session
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-
-import json
 
 from app import event_routes as event_routes_store
 from app import scheduled_events as scheduled_events_store
 from app import scheduler_runs as scheduler_runs_store
 from app import service_registry
 from app.config import MissingSecretError, settings
-from app.deps import get_current_auth, require_internal_bearer
 
 
 class DeleteResult(BaseModel):
@@ -159,16 +162,25 @@ class TickResult(BaseModel):
     scheduler_run_id: str
 
 
+# --- Outbound auth (M2M) -----------------------------------------------------
+#
+# One process-wide token client + Auth pair. The token client caches a minted
+# M2M JWT in memory and refreshes ~30s before expiry; M2MAuth attaches it to
+# every outbound httpx request and retries once on a 401 (after invalidating
+# the cache).
+_m2m_token_client = M2MTokenClient(settings.to_m2m_config())
+_m2m_auth = M2MAuth(_m2m_token_client)
+
+
 app = FastAPI(
     title="ops-engine-x",
-    version="0.2.0",
+    version="0.3.0",
     description=(
         "Operational-heartbeat service. Receives events from domain-service "
         "webhook ingests and routes them to downstream targets (managed agents "
         "via managed-agents-x today; future non-agent targets plug in via the "
-        "same event_routes registry). Internal routes require "
-        "OPEX_INTERNAL_BEARER_TOKEN; operator-facing routes require an "
-        "auth-engine-x JWT."
+        "same event_routes registry). Internal routes require an M2M JWT; "
+        "operator-facing routes require an auth-engine-x session JWT."
     ),
 )
 
@@ -185,7 +197,7 @@ def root() -> dict[str, str]:
     return {"service": "ops-engine-x", "status": "ok"}
 
 
-@app.get("/admin/status", dependencies=[Depends(get_current_auth)])
+@app.get("/admin/status", dependencies=[Depends(require_session)])
 def admin_status() -> dict[str, object]:
     """Authenticated diagnostic probe: reports which configured secrets Doppler
     has successfully injected. Values are never returned, only presence booleans.
@@ -193,23 +205,23 @@ def admin_status() -> dict[str, object]:
     Useful immediately after a deploy or DOPPLER_TOKEN rotation to verify the
     process actually loaded what you expect. The outbound-services block is
     derived from `app.service_registry` so adding a new slug automatically
-    surfaces its two creds here.
+    surfaces its base-URL cred here.
     """
     outbound_services: dict[str, dict[str, bool]] = {}
     for slug in service_registry.registered_slugs():
         reg = service_registry._REGISTRY[slug]  # noqa: SLF001
         outbound_services[slug] = {
             reg.base_url_env.lower(): bool(getattr(settings, reg.base_url_env.lower(), None)),
-            reg.auth_token_env.lower(): bool(getattr(settings, reg.auth_token_env.lower(), None)),
         }
     return {
         "service": "ops-engine-x",
         "status": "ok",
         "secrets_loaded": {
-            "opex_internal_bearer_token": bool(settings.opex_internal_bearer_token),
             "aux_jwks_url": bool(settings.aux_jwks_url),
             "aux_issuer": bool(settings.aux_issuer),
             "aux_audience": bool(settings.aux_audience),
+            "aux_api_base_url": bool(settings.aux_api_base_url),
+            "aux_m2m_api_key": bool(settings.aux_m2m_api_key),
             "opex_db_url_pooled": bool(settings.opex_db_url_pooled),
         },
         "outbound_services": outbound_services,
@@ -218,7 +230,7 @@ def admin_status() -> dict[str, object]:
 
 @app.post(
     "/events/receive",
-    dependencies=[Depends(require_internal_bearer)],
+    dependencies=[Depends(require_m2m)],
     response_model=None,
 )
 def receive_event(body: ReceiveEventPayload) -> JSONResponse:
@@ -235,7 +247,7 @@ def receive_event(body: ReceiveEventPayload) -> JSONResponse:
     - 404: no `event_route` for `(source, event_name)`.
     - 409: `event_route` exists but is disabled.
     - 500: `service_registry` has no `mag` slug (config bug).
-    - 503: `MAGS_API_BASE_URL` or `MAGS_AUTH_TOKEN` not set in this project's Doppler.
+    - 503: `MAGS_API_BASE_URL` not set in this project's Doppler.
     - 502: managed-agents-x unreachable (DNS, TCP, TLS, timeout).
     - Passthrough: any 2xx/4xx/5xx managed-agents-x returns, body verbatim.
     """
@@ -263,13 +275,10 @@ def receive_event(body: ReceiveEventPayload) -> JSONResponse:
     target_url = f"{target.base_url}/internal/agents/{agent_id}/invoke"
 
     try:
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=60.0, auth=_m2m_auth) as client:
             resp = client.post(
                 target_url,
-                headers={
-                    "Authorization": f"Bearer {target.auth_token}",
-                    "Content-Type": "application/json",
-                },
+                headers={"Content-Type": "application/json"},
                 json={
                     "source":          body.source,
                     "event_name":      body.event_name,
@@ -293,7 +302,7 @@ def receive_event(body: ReceiveEventPayload) -> JSONResponse:
 
 @app.get(
     "/event-routes",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=EventRouteList,
 )
 def list_event_routes() -> EventRouteList:
@@ -303,7 +312,7 @@ def list_event_routes() -> EventRouteList:
 
 @app.put(
     "/event-routes/{source}/{event_name}",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=EventRoute,
 )
 def put_event_route(source: str, event_name: str, payload: EventRoutePayload) -> EventRoute:
@@ -313,7 +322,7 @@ def put_event_route(source: str, event_name: str, payload: EventRoutePayload) ->
 
 @app.delete(
     "/event-routes/{source}/{event_name}",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=DeleteResult,
 )
 def delete_event_route(source: str, event_name: str) -> DeleteResult:
@@ -325,7 +334,7 @@ def delete_event_route(source: str, event_name: str) -> DeleteResult:
 
 @app.post(
     "/internal/scheduler/tick",
-    dependencies=[Depends(require_internal_bearer)],
+    dependencies=[Depends(require_m2m)],
     response_model=TickResult,
 )
 def scheduler_tick(body: TickRequest) -> TickResult:
@@ -335,8 +344,8 @@ def scheduler_tick(body: TickRequest) -> TickResult:
     Looks up `body.event_id` in `scheduled_events`, resolves the target
     service via `app.service_registry`, issues the configured HTTP call
     (GET or POST, per the row's `http_method`) to
-    `{base_url}{target_path}` with the service's bearer token, appends a
-    row to `scheduler_runs`, and returns the outcome.
+    `{base_url}{target_path}` with a fresh M2M JWT (via M2MAuth), appends
+    a row to `scheduler_runs`, and returns the outcome.
 
     Method defaults to POST for existing rows and for the vast majority of
     scheduled work (side-effectful). GET is supported for polling /
@@ -369,12 +378,12 @@ def scheduler_tick(body: TickRequest) -> TickResult:
     summary: Any | None = None
     error_text: str | None = None
 
-    headers = {"Authorization": f"Bearer {target.auth_token}"}
+    headers: dict[str, str] = {}
     if method == "POST":
         headers["Content-Type"] = "application/json"
 
     try:
-        with httpx.Client(timeout=60.0) as client:
+        with httpx.Client(timeout=60.0, auth=_m2m_auth) as client:
             if method == "GET":
                 resp = client.get(target_url, headers=headers)
             else:
@@ -416,7 +425,7 @@ def scheduler_tick(body: TickRequest) -> TickResult:
 
 @app.get(
     "/internal/scheduler/runs",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=SchedulerRunList,
 )
 def list_scheduler_runs(
@@ -430,7 +439,7 @@ def list_scheduler_runs(
 
 @app.get(
     "/scheduled-events",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=ScheduledEventList,
 )
 def list_scheduled_events() -> ScheduledEventList:
@@ -440,7 +449,7 @@ def list_scheduled_events() -> ScheduledEventList:
 
 @app.get(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=ScheduledEvent,
 )
 def get_scheduled_event(event_id: str) -> ScheduledEvent:
@@ -452,7 +461,7 @@ def get_scheduled_event(event_id: str) -> ScheduledEvent:
 
 @app.put(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=ScheduledEvent,
 )
 def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> ScheduledEvent:
@@ -480,7 +489,7 @@ def put_scheduled_event(event_id: str, payload: ScheduledEventPayload) -> Schedu
 
 @app.delete(
     "/scheduled-events/{event_id}",
-    dependencies=[Depends(get_current_auth)],
+    dependencies=[Depends(require_session)],
     response_model=DeleteResult,
 )
 def delete_scheduled_event(event_id: str) -> DeleteResult:
@@ -506,5 +515,3 @@ def _parse_summary(raw: str) -> Any | None:
         return json.loads(text)
     except ValueError:
         return {"raw_text": text, "truncated": len(raw) > max_bytes}
-
-

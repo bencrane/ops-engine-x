@@ -35,21 +35,25 @@ The canonical list of secrets lives in [`app/config.py`](app/config.py). No `.en
 
 | Name | Required | Notes |
 | ---- | -------- | ----- |
-| `OPEX_AUTH_TOKEN` | inbound, required | Bearer token domain services present when calling this service. Gates every non-public route. |
-| `SUPABASE_DB_URL` | required | Postgres connection string backing `event_routes`, `scheduled_events`, `scheduler_runs`. |
-| `MAG_API_URL` | outbound | Base URL for `managed-agents-x` (e.g. `https://api.managedagents.run`). Required for `/events/receive` to dispatch to agent targets. |
-| `MAG_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling `managed-agents-x`. Paired with `MAG_API_URL`. |
-| `SERX_API_URL` | outbound | Base URL for serx-api. Required whenever a `scheduled_events` row has `target_service='serx'`. |
-| `SERX_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling serx-api. Paired with `SERX_API_URL`. |
-| `OEX_API_URL` | outbound | Base URL for oex-api (e.g. `https://api.outboundengine.dev`). Required whenever a `scheduled_events` row has `target_service='oex'`. |
-| `OEX_AUTH_TOKEN` | outbound | Bearer token ops-engine-x presents when calling oex-api. Paired with `OEX_API_URL`. |
-| `SUPABASE_URL` | optional | Reserved for future use. |
-| `SUPABASE_SERVICE_ROLE_KEY` | optional | Reserved. |
-| `SUPABASE_ANON_KEY` | optional | Reserved. |
-| `SUPABASE_PROJECT_REF` | optional | Supabase project ref slug. |
+| `AUX_JWKS_URL` | required (boot) | JWKS endpoint of `auth-engine-x`. Used by `aux_m2m_server` to verify EdDSA JWTs (both operator session JWTs and M2M JWTs). Inherited from the `shared-services` Doppler base. |
+| `AUX_ISSUER` | required (boot) | Expected `iss` claim on inbound JWTs. Inherited from `shared-services`. |
+| `AUX_AUDIENCE` | required (boot) | Expected `aud` claim on inbound JWTs. Inherited from `shared-services`. |
+| `AUX_API_BASE_URL` | required (boot) | `auth-engine-x` base URL. Used by `aux_m2m_client` to mint M2M JWTs for outbound calls. Inherited from `shared-services`. |
+| `AUX_M2M_API_KEY` | required (boot) | This backend's own M2M API key (its identity in `auth-engine-x`). Caller-side credential for outbound calls to MAGS/SERX/OEX. **Specific to ops-engine-x** — not shared. |
+| `OPEX_DB_URL_POOLED` | required (when DB code paths run) | Postgres DSN backing `event_routes`, `scheduled_events`, `scheduler_runs`. |
+| `OPEX_DB_URL_DIRECT` | optional (reserved) | Direct Postgres connection string. Reserved for future migration scripts. |
+| `MAGS_API_BASE_URL` | outbound | Base URL for `managed-agents-x` (e.g. `https://api.managedagents.run`). Required for `/events/receive` to dispatch to agent targets. |
+| `SERX_API_BASE_URL` | outbound | Base URL for serx-api. Required whenever a `scheduled_events` row has `target_service='serx'`. |
+| `OEX_API_BASE_URL` | outbound | Base URL for oex-api (e.g. `https://api.outboundengine.dev`). Required whenever a `scheduled_events` row has `target_service='oex'`. |
+| `OPEX_SUPABASE_URL` | optional | Reserved for future use. |
+| `OPEX_SUPABASE_SERVICE_ROLE_KEY` | optional | Reserved. |
+| `OPEX_SUPABASE_ANON_KEY` | optional | Reserved. |
+| `OPEX_SUPABASE_PROJECT_REF` | optional | Supabase project ref slug. |
 
 Deliberately **not** in this project's Doppler:
 
+- `OPEX_INTERNAL_BEARER_TOKEN` / `OPEX_AUTH_TOKEN` — **removed** during the M2M migration. Internal callers (SERX/OEX webhook ingest, Trigger.dev tasks) now mint short-lived EdDSA M2M JWTs via `auth-engine-x` instead of presenting a static shared secret.
+- `MAGS_AUTH_TOKEN` / `SERX_INTERNAL_BEARER_TOKEN` / `OEX_AUTH_TOKEN` — **removed**. Outbound calls (ops-engine-x → MAGS/SERX/OEX) use `aux_m2m_client.M2MAuth` with `AUX_M2M_API_KEY`, not service-specific bearers.
 - `ANTHROPIC_API_KEY` — held only by `managed-agents-x`. All Anthropic traffic flows through that service.
 
 ## Local development
@@ -96,9 +100,15 @@ Smoke test:
 ```bash
 curl localhost:8080/health           # {"status":"ok"}
 curl localhost:8080/                 # {"service":"ops-engine-x","status":"ok"}
-curl -H "Authorization: Bearer $OPEX_AUTH_TOKEN" localhost:8080/admin/status
-# → secrets_loaded: {opex_auth_token, supabase_db_url}
-# → outbound_services: {mag, serx, oex} each reporting url + token presence
+curl -H "Authorization: Bearer $OPERATOR_JWT" localhost:8080/admin/status
+# → secrets_loaded: {aux_jwks_url, aux_issuer, aux_audience, aux_api_base_url,
+#                    aux_m2m_api_key, opex_db_url_pooled}
+# → outbound_services: {mag, serx, oex} each reporting base-URL presence.
+#
+# /admin/status requires an operator session JWT from auth-engine-x.
+# /events/receive and /internal/scheduler/tick require an M2M JWT (also
+# from auth-engine-x); both verified by aux_m2m_server against the same
+# JWKS endpoint.
 ```
 
 ## Railway deployment
@@ -117,3 +127,7 @@ curl -H "Authorization: Bearer $OPEX_AUTH_TOKEN" localhost:8080/admin/status
 3. At the call site that needs it, use `require("new_secret_name")` (or a FastAPI `Depends()` factory — see `AGENTS.md`).
 4. Add a row to the secrets table above.
 5. Redeploy (Railway will pick up the new value on next boot via `doppler run --`).
+
+---
+
+_Last updated: 2026-04-25 (M2M cutover — replaced static bearers with EdDSA M2M JWTs minted by `auth-engine-x`)._

@@ -1,13 +1,15 @@
 // oex.auth_me_probe — once a day, ask ops-engine-x to fire this scheduled
-// event. ops-engine-x's dispatcher GETs oex-api's `/api/auth/me` and
-// records the outcome in scheduler_runs. A green run proves:
-//   (1) ops-engine-x can reach oex-api at OEX_API_URL,
-//   (2) OEX_AUTH_TOKEN is valid,
-//   (3) the service_registry wiring for "oex" is correct.
+// event. ops-engine-x's dispatcher GETs oex-api's `/api/auth/me` (with a
+// fresh M2M JWT, via service_registry → M2MAuth) and records the outcome
+// in scheduler_runs. A green run proves:
+//   (1) ops-engine-x can reach oex-api at OEX_API_BASE_URL,
+//   (2) ops-engine-x's M2M minting + outbound-auth wiring is healthy,
+//   (3) oex-api accepts ops-engine-x's M2M identity on /api/auth/me,
+//   (4) the service_registry wiring for "oex" is correct.
 //
-// All routing (target service, target path, HTTP method, bearer token)
-// lives in the ops-engine-x scheduled_events registry + service_registry.
-// This file is pure Trigger.dev wiring: task id + cron + "fire it."
+// All routing (target service, target path, HTTP method) lives in the
+// ops-engine-x scheduled_events registry + service_registry. This file is
+// pure Trigger.dev wiring: task id + cron + "fire it."
 
 import { schedules } from "@trigger.dev/sdk/v3";
 import { fireScheduledEvent } from "./lib/fire-scheduled-event";

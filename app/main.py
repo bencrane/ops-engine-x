@@ -36,8 +36,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
-from aux_m2m_client import M2MAuth, M2MTokenClient
-from aux_m2m_server import require_m2m, require_session
+from aux_m2m_client import AsyncM2MTokenClient, M2MAuth, M2MTokenClient
+from aux_m2m_server import build_health_router, require_m2m, require_session
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -171,6 +171,11 @@ class TickResult(BaseModel):
 _m2m_token_client = M2MTokenClient(settings.to_m2m_config())
 _m2m_auth = M2MAuth(_m2m_token_client)
 
+# Async sibling for the depth-health router. The router's m2m_mint check
+# awaits get_token(force_refresh=True), which requires an async client; the
+# sync token client above continues to back outbound httpx calls via M2MAuth.
+_async_m2m_token_client = AsyncM2MTokenClient(settings.to_m2m_config())
+
 
 app = FastAPI(
     title="ops-engine-x",
@@ -185,10 +190,33 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    """Liveness probe. Must stay dumb: no DB, no upstream calls, no secret checks."""
-    return {"status": "ok"}
+# --- Health router ----------------------------------------------------------
+#
+# Uniform AUX health surface (v0.2.0+ of aux-m2m):
+#   GET /api/health        liveness (always 200, no checks)
+#   GET /api/health/deep   depth check — JWKS reachability + local M2M
+#                          mintability + each declared peer's /api/health
+#
+# Peers are derived from `service_registry`: every downstream we route to
+# (mag, oex, serx today) is included if its base URL is configured. Peers
+# whose base URL is unset are skipped rather than reported as broken — an
+# unconfigured peer is a deployment-stage concern, not a health-of-fabric
+# signal.
+_peer_health_urls: dict[str, str] = {}
+for _slug in service_registry.registered_slugs():
+    _reg = service_registry._REGISTRY[_slug]  # noqa: SLF001
+    _base_url = getattr(settings, _reg.base_url_env.lower(), None)
+    if _base_url:
+        _peer_health_urls[_slug] = f"{_base_url.rstrip('/')}/api/health"
+
+app.include_router(
+    build_health_router(
+        service_name="opex",
+        version=app.version,
+        token_client=_async_m2m_token_client,
+        peers=_peer_health_urls,
+    )
+)
 
 
 @app.get("/")
